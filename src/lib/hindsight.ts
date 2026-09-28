@@ -46,6 +46,21 @@ class Hindsight {
     }
   }
 
+  async retainMemory(content: string, type: string = 'Learned Memory', title: string = 'User Fact') {
+    return this.createMemory({
+      type,
+      title,
+      content,
+      metadata: {}
+    });
+  }
+
+  async recallMemory(query: string): Promise<Memory[]> {
+    const memories = this.getMemories();
+    const queryLower = query.toLowerCase();
+    return memories.filter(m => m.content.toLowerCase().includes(queryLower) || m.title.toLowerCase().includes(queryLower));
+  }
+
   async getRecentMemories(limit: number = 50): Promise<Memory[]> {
     if (!hindsightKey) {
       console.warn("Hindsight API key not configured. Using local fallback.");
@@ -59,3 +74,4 @@ class Hindsight {
 }
 
 export const hindsight = new Hindsight();
+

@@ -13,7 +13,7 @@ import { Loading } from "./pages/Loading"
 import { Reports } from "./pages/Reports"
 import { Settings } from "./pages/Settings"
 import { SalesPayments } from "./pages/SalesPayments"
-import { AIMemoryAgent } from "./pages/AIMemoryAgent"
+import { AIMemoryAgent } from "./components/AIMemoryAgent"
 function App() {
   return (
     <Router>

@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { Brain, Send, Clock } from "lucide-react";
+import { Brain, Send, Clock, ShoppingCart, DollarSign, Package, Receipt, Users, Lightbulb } from "lucide-react";
 import { hindsight, type Memory } from "../lib/hindsight";
 import { codein } from "../lib/codein";
 import { generateAIResponse } from "../lib/groq";
+import { processUserMemory } from "../lib/memoryService";
 
 export function AIMemoryAgent() {
   const [activeTab, setActiveTab] = useState<"chat" | "timeline">("chat");
@@ -21,6 +22,8 @@ export function AIMemoryAgent() {
 
   const loadMemories = async () => {
     const data = await hindsight.getRecentMemories(50);
+    // Sort newest first
+    data.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     setMemories(data);
   };
 
@@ -31,11 +34,26 @@ export function AIMemoryAgent() {
     setQuery("");
     setLoading(true);
 
-    const context = await codein.buildContext(userMsg);
-    const response = await generateAIResponse(userMsg, context);
+    try {
+      // 1. Check if user wants to remember something
+      const memoryResponse = await processUserMemory(userMsg);
+      if (memoryResponse) {
+        setMessages(prev => [...prev, { role: 'ai', content: memoryResponse }]);
+        setLoading(false);
+        return;
+      }
 
-    setMessages(prev => [...prev, { role: 'ai', content: response }]);
-    setLoading(false);
+      // 2. Otherwise generate AI response
+      const context = await codein.buildContext(userMsg);
+      const response = await generateAIResponse(userMsg, context);
+
+      setMessages(prev => [...prev, { role: 'ai', content: response }]);
+    } catch (error: any) {
+      console.error("AI Memory Agent Error:", error);
+      setMessages(prev => [...prev, { role: 'ai', content: error.message || "An error occurred while generating the response." }]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const suggestions = [
@@ -44,6 +62,18 @@ export function AIMemoryAgent() {
     "Show today's collections.",
     "Which customer usually pays late?",
   ];
+
+  const getMemoryIcon = (type: string) => {
+    switch (type.toLowerCase()) {
+      case 'purchase': return <ShoppingCart className="w-6 h-6" />;
+      case 'payment': return <DollarSign className="w-6 h-6" />;
+      case 'sale': return <Package className="w-6 h-6" />;
+      case 'expense': return <Receipt className="w-6 h-6" />;
+      case 'attendance': return <Users className="w-6 h-6" />;
+      case 'learned memory': return <Lightbulb className="w-6 h-6" />;
+      default: return <Clock className="w-6 h-6" />;
+    }
+  };
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] max-w-5xl mx-auto space-y-4">
@@ -120,15 +150,15 @@ export function AIMemoryAgent() {
             ) : (
               memories.map((m) => (
                 <div key={m.id} className="border rounded-lg p-4 flex gap-4 hover:border-emerald-200 transition-colors">
-                  <div className="bg-emerald-50 text-emerald-600 p-3 rounded-full h-fit">
-                    <Clock className="w-6 h-6" />
+                  <div className="bg-emerald-50 text-emerald-600 p-3 rounded-full h-fit flex items-center justify-center">
+                    {getMemoryIcon(m.type)}
                   </div>
                   <div>
                     <h4 className="font-semibold text-lg">{m.title}</h4>
                     <p className="text-gray-600 mt-1">{m.content}</p>
                     <div className="text-xs text-gray-400 mt-2 flex gap-2">
                       <span className="bg-gray-100 px-2 py-1 rounded">{m.type}</span>
-                      <span className="py-1">{new Date(m.timestamp).toLocaleDateString()}</span>
+                      <span className="py-1">{new Date(m.timestamp).toLocaleString()}</span>
                     </div>
                   </div>
                 </div>

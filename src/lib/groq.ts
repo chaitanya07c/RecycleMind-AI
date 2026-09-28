@@ -9,21 +9,21 @@ const groq = new Groq({
 
 export async function generateAIResponse(prompt: string, context: string): Promise<string> {
   if (!apiKey) {
-    return "Groq API key not configured";
+    return "Groq API key not configured. Please add VITE_GROQ_API_KEY to your .env file.";
   }
   try {
     const response = await groq.chat.completions.create({
       messages: [
         {
           role: "system",
-          content: "You are RecycleMind AI, an intelligent memory agent for a recycling business. Answer queries accurately based ONLY on the provided context. If data is unavailable, say 'No business record found.' Do not hallucinate."
+          content: "You are RecycleMind AI, an intelligent business assistant for Siva Durga Traders. Use live ERP data from Supabase and long-term memory from Hindsight. Never invent records. Learn user facts when they ask you to remember something."
         },
         {
           role: "user",
-          content: `Context:\n${context}\n\nQuestion: ${prompt}`
+          content: `Business Context & Memories:\n${context}\n\nUser Question: ${prompt}`
         }
       ],
-      model: "openai/gpt-oss-20b",
+      model: "llama-3.1-8b-instant",
     });
 
     return response.choices[0]?.message?.content || "No response generated.";
