@@ -21,7 +21,7 @@ export async function extractIntent(query: string): Promise<string[]> {
           content: query
         }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
     });
     const result = response.choices[0]?.message?.content || "";
     return result.split(',').map(s => s.trim().toLowerCase());
@@ -46,7 +46,7 @@ export async function generateAIResponse(prompt: string, context: string): Promi
           content: `Analyzed Data:\n${context}\n\nUser Question: ${prompt}`
         }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
     });
 
     return response.choices[0]?.message?.content || "No response generated.";
