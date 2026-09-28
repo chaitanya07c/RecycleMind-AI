@@ -32,7 +32,7 @@ Rules:
           content: `Analyzed ERP Data:\n${context}\n\nUser Question: ${prompt}`
         }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
     });
 
     return response.choices[0]?.message?.content || "No response generated.";
@@ -62,7 +62,7 @@ export async function generateGeneralResponse(prompt: string): Promise<string> {
           content: prompt
         }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
     });
     return response.choices[0]?.message?.content || "Hello! Ask me about your business.";
   } catch (error: any) {
@@ -85,7 +85,7 @@ export async function generateInsights(context: string): Promise<string[]> {
           content: `Context:\n${context}`
         }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
     });
 
     const content = response.choices[0]?.message?.content || "";
