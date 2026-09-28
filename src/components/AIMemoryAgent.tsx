@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { Brain, Send, Clock, ShoppingCart, DollarSign, Package, Receipt, Users, Lightbulb } from "lucide-react";
 import { hindsight, type Memory } from "../lib/hindsight";
-import { codein } from "../lib/codein";
 import { generateAIResponse } from "../lib/groq";
 import { processUserMemory } from "../lib/memoryService";
 
@@ -43,8 +42,15 @@ export function AIMemoryAgent() {
         return;
       }
 
-      // 2. Otherwise generate AI response
-      const context = await codein.buildContext(userMsg);
+      // 2. Extract Intent
+      const { extractIntent } = await import("../lib/groq");
+      const intents = await extractIntent(userMsg);
+
+      // 3. Fetch structured context using business tools
+      const { businessTools } = await import("../lib/businessTools");
+      const context = await businessTools.fetchContext(intents, userMsg);
+      
+      // 4. Generate AI response
       const response = await generateAIResponse(userMsg, context);
 
       setMessages(prev => [...prev, { role: 'ai', content: response }]);

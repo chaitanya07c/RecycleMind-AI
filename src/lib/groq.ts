@@ -7,6 +7,29 @@ const groq = new Groq({
   dangerouslyAllowBrowser: true,
 });
 
+export async function extractIntent(query: string): Promise<string[]> {
+  if (!apiKey) return ["purchases", "sales", "attendance", "expenses", "stock", "memory"];
+  try {
+    const response = await groq.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content: "Given the user's query about a business ERP, reply ONLY with a comma-separated list of tables needed to answer it. Choose from: purchases, sales, attendance, expenses, stock, memory. Example: sales, memory"
+        },
+        {
+          role: "user",
+          content: query
+        }
+      ],
+      model: "llama-3.1-8b-instant",
+    });
+    const result = response.choices[0]?.message?.content || "";
+    return result.split(',').map(s => s.trim().toLowerCase());
+  } catch (e) {
+    return ["purchases", "sales", "attendance", "expenses", "stock", "memory"];
+  }
+}
+
 export async function generateAIResponse(prompt: string, context: string): Promise<string> {
   if (!apiKey) {
     return "Groq API key not configured. Please add VITE_GROQ_API_KEY to your .env file.";
@@ -16,14 +39,14 @@ export async function generateAIResponse(prompt: string, context: string): Promi
       messages: [
         {
           role: "system",
-          content: "You are RecycleMind AI, an intelligent business assistant for Siva Durga Traders. Use live ERP data from Supabase and long-term memory from Hindsight. Never invent records. Learn user facts when they ask you to remember something."
+          content: "You are an AI ERP Analyst for Siva Durga Traders. Provide conversational, rich, and natural answers using the provided analyzed ERP data context. Merge memories naturally. Do not just spit out data, weave it into a cohesive answer."
         },
         {
           role: "user",
-          content: `Business Context & Memories:\n${context}\n\nUser Question: ${prompt}`
+          content: `Analyzed Data:\n${context}\n\nUser Question: ${prompt}`
         }
       ],
-      model: "openai/gpt-oss-20b",
+      model: "llama-3.1-8b-instant",
     });
 
     return response.choices[0]?.message?.content || "No response generated.";
