@@ -8,6 +8,7 @@ import { t } from "@/lib/i18n"
 import { formatDate, toLocalDateString, getStartOfMonthString, getEndOfMonthString, getMsUntilNextMidnight } from "@/lib/utils"
 import { generateTablePDF } from "@/lib/pdfTemplate"
 import { addToRecycleBin } from "@/lib/recycleBin"
+import { hindsight } from "@/lib/hindsight"
 import * as XLSX from "xlsx"
 
 export const EXPENSE_CATEGORIES = [
@@ -428,6 +429,12 @@ export function Expenses() {
           .insert([payload])
         if (error) throw error
         toast.success("Expense added successfully")
+        hindsight.createMemory({
+          type: 'Expense',
+          title: 'Expense Recorded',
+          content: `${formData.category} expense of ₹${numericAmount} on ${formData.date}.`,
+          metadata: { category: formData.category, amount: numericAmount, date: formData.date }
+        })
       }
       setIsModalOpen(false)
       fetchExpenses()

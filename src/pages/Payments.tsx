@@ -16,6 +16,7 @@ import type { Shop } from "@/types/database"
 import { useOutletContext } from "react-router-dom"
 import { t } from "@/lib/i18n"
 import { formatDate, getItemUnit, STANDARD_UNIT_OPTIONS, getCombinableShops } from "@/lib/utils"
+import { hindsight } from "@/lib/hindsight"
 
 const formatInr = (value: number) => new Intl.NumberFormat('en-IN').format(value)
 
@@ -436,6 +437,13 @@ export function Payments() {
       }
 
       toast.success(newStatus === 'Completed' ? t("paymentSaved", lang) : "Partial payment saved successfully!")
+
+      hindsight.createMemory({
+        type: 'Payment',
+        title: newStatus === 'Completed' ? 'Payment Completed' : 'Partial Payment',
+        content: `Payment of ₹${actualPay} for ${paymentModal.shop_name}. Status: ${newStatus}. Remaining: ₹${newRemainingBalance}.`,
+        metadata: { shop: paymentModal.shop_name, amount: actualPay, status: newStatus, remaining: newRemainingBalance, date: today }
+      })
 
       const sessionToExport: GroupedSession = {
         ...paymentModal,

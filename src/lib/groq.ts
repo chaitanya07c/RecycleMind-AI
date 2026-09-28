@@ -9,7 +9,7 @@ const groq = new Groq({
 
 export async function generateAIResponse(prompt: string, context: string): Promise<string> {
   if (!apiKey) {
-    return "API Key missing. Please set VITE_GROQ_API_KEY.";
+    return "Groq API key not configured";
   }
   try {
     const response = await groq.chat.completions.create({
@@ -27,9 +27,9 @@ export async function generateAIResponse(prompt: string, context: string): Promi
     });
 
     return response.choices[0]?.message?.content || "No response generated.";
-  } catch (error) {
-    console.error("Groq generation error:", error);
-    return "An error occurred while generating the response.";
+  } catch (error: any) {
+    console.error("Groq generation error:", error.message || error);
+    return `Groq API Error: ${error.message || "Failed to generate response."}`;
   }
 }
 

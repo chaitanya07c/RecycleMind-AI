@@ -8,6 +8,7 @@ import { t } from "@/lib/i18n"
 import { formatDate, toLocalDateString, getStartOfMonthString, getEndOfMonthString } from "@/lib/utils"
 import { generateTablePDF } from "@/lib/pdfTemplate"
 import { addToRecycleBin } from "@/lib/recycleBin"
+import { hindsight } from "@/lib/hindsight"
 import * as XLSX from "xlsx"
 
 export function Workers() {
@@ -127,6 +128,13 @@ export function Workers() {
       await supabase.from('attendance').insert([{ employee_id: empId, date, status }])
     }
     toast.success(lang === 'te' ? "హాజరు నమోదయ్యాయి" : "Attendance marked")
+    const empName = employees.find(e => e.id === empId)?.name || empId
+    hindsight.createMemory({
+      type: 'Attendance',
+      title: 'Attendance Marked',
+      content: `${empName} marked as ${status} on ${date}.`,
+      metadata: { employee: empName, status, date }
+    })
     setActivePopup(null)
     if (activeTab === "Calendar") fetchMonthAttendance()
     else fetchDailyAttendance()
