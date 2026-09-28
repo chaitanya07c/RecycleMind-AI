@@ -21,7 +21,7 @@ export async function extractIntent(query: string): Promise<string[]> {
           content: query
         }
       ],
-      model: "openai/gpt-oss-20b",
+      model: "llama-3.1-8b-instant",
     });
     const result = response.choices[0]?.message?.content || "";
     return result.split(',').map(s => s.trim().toLowerCase());
@@ -39,14 +39,14 @@ export async function generateAIResponse(prompt: string, context: string): Promi
       messages: [
         {
           role: "system",
-          content: "You are an AI ERP Analyst for Siva Durga Traders. Provide conversational, rich, and natural answers using the provided analyzed ERP data context. Merge memories naturally. Do not just spit out data, weave it into a cohesive answer."
+          content: "You are an AI ERP Analyst for Siva Durga Traders. Provide conversational, rich, and natural answers using the provided analyzed ERP data context. Merge memories naturally. Keep your response short and human (2 to 6 lines max unless the user asks for details). Do not use large markdown tables. Use bullets only when necessary."
         },
         {
           role: "user",
           content: `Analyzed Data:\n${context}\n\nUser Question: ${prompt}`
         }
       ],
-      model: "openai/gpt-oss-20b",
+      model: "llama-3.1-8b-instant",
     });
 
     return response.choices[0]?.message?.content || "No response generated.";

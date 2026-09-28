@@ -6,39 +6,39 @@ export class BusinessTools {
     let contextStr = "==== ANALYZED ERP DATA ====\n";
 
     if (intents.includes('purchases')) {
-      const { data: purchases } = await supabase.from('purchases').select('grand_total, shop_id, date, payment_status, shops(name)');
-      const { data: items } = await supabase.from('purchase_items').select('item_name, rate, quantity, purchases(date)');
+      const { data: purchases } = await supabase.from('purchases').select('id, grand_total, shop_id, date, payment_status, shops(name)');
+      const { data: items } = await supabase.from('purchase_items').select('item_name, rate, quantity, purchase_id');
       
-      if (purchases) {
-        const total = purchases.reduce((sum, p) => sum + Number(p.grand_total || 0), 0);
-        const thisMonth = new Date().toISOString().slice(0, 7);
-        const monthPurchases = purchases.filter(p => p.date?.startsWith(thisMonth));
-        const monthTotal = monthPurchases.reduce((sum, p) => sum + Number(p.grand_total || 0), 0);
+      if (purchases && items) {
+        // Cheapest Supplier Calculation
+        const itemCosts: Record<string, Record<string, { qty: number; cost: number }>> = {};
         
-        const shopTotals: Record<string, number> = {};
         purchases.forEach(p => {
           const sName = (p.shops as any)?.name || 'Unknown';
-          shopTotals[sName] = (shopTotals[sName] || 0) + Number(p.grand_total || 0);
+          const pItems = items.filter(i => i.purchase_id === p.id);
+          pItems.forEach(i => {
+            const name = i.item_name || 'Unknown';
+            if (!itemCosts[name]) itemCosts[name] = {};
+            if (!itemCosts[name][sName]) itemCosts[name][sName] = { qty: 0, cost: 0 };
+            itemCosts[name][sName].qty += Number(i.quantity || 0);
+            itemCosts[name][sName].cost += (Number(i.quantity || 0) * Number(i.rate || 0));
+          });
         });
 
-        contextStr += `Purchases:\nTotal purchases all-time: ₹${total}\nThis month: ₹${monthTotal}\n`;
-        Object.entries(shopTotals).forEach(([shop, amt]) => {
-          contextStr += `- ${shop}: ₹${amt}\n`;
-        });
-      }
-
-      if (items) {
-        const itemStats: Record<string, {totalQty: number, totalCost: number}> = {};
-        items.forEach(i => {
-          if (!itemStats[i.item_name]) itemStats[i.item_name] = { totalQty: 0, totalCost: 0 };
-          itemStats[i.item_name].totalQty += Number(i.quantity || 0);
-          itemStats[i.item_name].totalCost += (Number(i.quantity || 0) * Number(i.rate || 0));
-        });
-        
-        contextStr += `Item Averages:\n`;
-        Object.entries(itemStats).forEach(([name, stats]) => {
-          const avg = stats.totalQty > 0 ? stats.totalCost / stats.totalQty : 0;
-          contextStr += `- ${name}: avg ₹${avg.toFixed(2)}\n`;
+        contextStr += `Cheapest Suppliers by Item:\n`;
+        Object.entries(itemCosts).slice(0, 10).forEach(([itemName, shopData]) => {
+          let bestShop = '';
+          let bestAvg = Infinity;
+          Object.entries(shopData).forEach(([shop, stats]) => {
+            const avg = stats.qty > 0 ? stats.cost / stats.qty : Infinity;
+            if (avg < bestAvg) {
+              bestAvg = avg;
+              bestShop = shop;
+            }
+          });
+          if (bestAvg !== Infinity) {
+            contextStr += `- ${itemName}: ${bestShop} (Avg ₹${bestAvg.toFixed(2)})\n`;
+          }
         });
       }
     }
@@ -46,37 +46,34 @@ export class BusinessTools {
     if (intents.includes('sales')) {
       const { data: sales } = await supabase.from('sales').select('total_amount, buyer_name, date, payment_status, payment_history');
       if (sales) {
-        const thisMonth = new Date().toISOString().slice(0, 7);
-        const monthSales = sales.filter(s => s.date?.startsWith(thisMonth));
-        const monthTotal = monthSales.reduce((sum, s) => sum + Number(s.total_amount || 0), 0);
-        
         const buyerPending: Record<string, number> = {};
-        const buyerDelays: Record<string, {totalDays: number, count: number}> = {};
+        const buyerDelays: Record<string, {totalDays: number, maxDelay: number, count: number}> = {};
+        let totalPending = 0;
         
         sales.forEach(s => {
           if (s.payment_status !== 'Completed') {
             buyerPending[s.buyer_name] = (buyerPending[s.buyer_name] || 0) + Number(s.total_amount || 0);
+            totalPending += Number(s.total_amount || 0);
           }
           
           if (s.payment_status === 'Completed' && s.payment_history && s.payment_history.length > 0) {
             const saleDate = new Date(s.date).getTime();
             const lastPaymentDate = new Date(s.payment_history[s.payment_history.length - 1].date).getTime();
-            const daysDiff = (lastPaymentDate - saleDate) / (1000 * 3600 * 24);
-            if (daysDiff > 0) {
-              if (!buyerDelays[s.buyer_name]) buyerDelays[s.buyer_name] = { totalDays: 0, count: 0 };
-              buyerDelays[s.buyer_name].totalDays += daysDiff;
-              buyerDelays[s.buyer_name].count += 1;
-            }
+            const daysDiff = Math.max(0, (lastPaymentDate - saleDate) / (1000 * 3600 * 24));
+            
+            if (!buyerDelays[s.buyer_name]) buyerDelays[s.buyer_name] = { totalDays: 0, maxDelay: 0, count: 0 };
+            buyerDelays[s.buyer_name].totalDays += daysDiff;
+            buyerDelays[s.buyer_name].count += 1;
+            if (daysDiff > buyerDelays[s.buyer_name].maxDelay) buyerDelays[s.buyer_name].maxDelay = daysDiff;
           }
         });
 
-        contextStr += `\nSales:\nThis month sales: ₹${monthTotal}\nPending Balances:\n`;
-        Object.entries(buyerPending).forEach(([buyer, amt]) => {
-          if (amt > 0) contextStr += `- ${buyer}: ₹${amt}\n`;
-        });
-        contextStr += `Payment Delays (avg days):\n`;
+        contextStr += `\nSales Analysis:\n`;
+        contextStr += `Total Pending Sales: ₹${totalPending}\n`;
         Object.entries(buyerDelays).forEach(([buyer, d]) => {
-          contextStr += `- ${buyer}: ${(d.totalDays / d.count).toFixed(1)} days\n`;
+          const avgDelay = d.count > 0 ? (d.totalDays / d.count).toFixed(1) : 0;
+          const pending = buyerPending[buyer] || 0;
+          contextStr += `- ${buyer}: Avg delay ${avgDelay} days (Max ${d.maxDelay.toFixed(0)}), Pending: ₹${pending}\n`;
         });
       }
     }
@@ -94,9 +91,10 @@ export class BusinessTools {
         });
         
         contextStr += `\nAttendance:\n`;
-        Object.entries(workerStats).forEach(([name, stats]) => {
+        const sortedWorkers = Object.entries(workerStats).sort((a, b) => b[1].present - a[1].present);
+        sortedWorkers.forEach(([name, stats], idx) => {
           const pct = (stats.present / stats.total) * 100;
-          contextStr += `- ${name}: ${pct.toFixed(1)}% present (${stats.absent} days absent)\n`;
+          contextStr += `- Rank ${idx + 1}: ${name} - ${pct.toFixed(1)}% present (${stats.absent} days absent)\n`;
         });
       }
     }
@@ -104,13 +102,29 @@ export class BusinessTools {
     if (intents.includes('expenses')) {
       const { data: expenses } = await supabase.from('expenses').select('amount, category, date');
       if (expenses) {
-        const cats: Record<string, number> = {};
+        const cats: Record<string, Record<string, number>> = {};
         expenses.forEach(e => {
-          cats[e.category] = (cats[e.category] || 0) + Number(e.amount || 0);
+          const month = e.date.slice(0, 7);
+          if (!cats[month]) cats[month] = {};
+          cats[month][e.category] = (cats[month][e.category] || 0) + Number(e.amount || 0);
         });
-        contextStr += `\nExpenses:\n`;
-        Object.entries(cats).forEach(([cat, amt]) => {
-          contextStr += `- ${cat}: ₹${amt}\n`;
+        contextStr += `\nExpenses Summary:\n`;
+        Object.entries(cats).slice(-2).forEach(([month, categories]) => {
+          contextStr += `Month: ${month}\n`;
+          Object.entries(categories).forEach(([cat, amt]) => {
+            contextStr += `  - ${cat}: ₹${amt}\n`;
+          });
+        });
+      }
+    }
+
+    if (intents.includes('stock')) {
+      const { data: stock } = await supabase.from('materials').select('name, stock, minimum_stock');
+      if (stock) {
+        contextStr += `\nStock Levels:\n`;
+        stock.forEach(s => {
+          const status = s.stock < s.minimum_stock ? 'LOW' : 'OK';
+          contextStr += `- ${s.name}: ${s.stock} (Min: ${s.minimum_stock}) [${status}]\n`;
         });
       }
     }
@@ -126,8 +140,10 @@ export class BusinessTools {
       }
     }
 
-    return contextStr;
+    // Limit context length to avoid huge payload
+    return contextStr.slice(0, 3000);
   }
 }
 
 export const businessTools = new BusinessTools();
+
