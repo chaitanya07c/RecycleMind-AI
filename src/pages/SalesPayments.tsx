@@ -1,0 +1,1484 @@
+import { useEffect, useState } from "react"
+import { supabase } from "@/lib/supabase"
+import { Printer, Download, Share2, CheckCircle2, Eye, Clock, Search, Wallet, Trash2, Edit2, Plus } from "lucide-react"
+import { toast } from "sonner"
+import { fetchSalesBillBreakdowns, generateSalesCombinedPDF, shareSalesWhatsApp, formatQuantity } from "@/lib/salesPdfUtils"
+import type { GroupedSaleSession, SalesBillBreakdown } from "@/lib/salesPdfUtils"
+import { useOutletContext } from "react-router-dom"
+import { t } from "@/lib/i18n"
+import { formatDate, formatVehicleNumber, isValidVehicleNumber, isValidDriverName, isValidDriverPhone } from "@/lib/utils"
+import { addToRecycleBin } from "@/lib/recycleBin"
+
+const formatInr = (value: number) => new Intl.NumberFormat('en-IN').format(value)
+
+export function SalesPayments() {
+  const { lang } = useOutletContext<{ lang: "en" | "te" }>()
+  const [activeTab, setActiveTab] = useState<'Pending' | 'Completed'>('Pending')
+  const [groupedSessions, setGroupedSessions] = useState<GroupedSaleSession[]>([])
+  const [searchQuery, setSearchQuery] = useState("")
+  const [overallPending, setOverallPending] = useState(0)
+  const [overallCompleted, setOverallCompleted] = useState(0)
+  const [overallAdvance, setOverallAdvance] = useState(0)
+
+  const [detailsModal, setDetailsModal] = useState<{ session: GroupedSaleSession, bills: SalesBillBreakdown[] } | null>(null)
+  
+  const [paymentModal, setPaymentModal] = useState<GroupedSaleSession | null>(null)
+  const [exportPromptSession, setExportPromptSession] = useState<GroupedSaleSession | null>(null)
+  const [salesGroupExportPrompt, setSalesGroupExportPrompt] = useState<{ session: GroupedSaleSession, label: string } | null>(null)
+
+  // Edit Invoice states
+  const [editingInvoice, setEditingInvoice] = useState<SalesBillBreakdown | null>(null)
+  const [editInvoiceDate, setEditInvoiceDate] = useState("")
+  const [editInvoiceVehicleNumber, setEditInvoiceVehicleNumber] = useState("")
+  const [editInvoiceDriverName, setEditInvoiceDriverName] = useState("")
+  const [editInvoiceDriverPhone, setEditInvoiceDriverPhone] = useState("")
+  const [editInvoiceRemarks, setEditInvoiceRemarks] = useState("")
+  const [editInvoiceAdvance, setEditInvoiceAdvance] = useState(0)
+  const [editInvoicePartialPayment, setEditInvoicePartialPayment] = useState(0)
+  const [editInvoiceItems, setEditInvoiceItems] = useState<{ name: string, quantity: number, rate: number, total: number }[]>([])
+  const [editInvoiceAdditionalExpenses, setEditInvoiceAdditionalExpenses] = useState<{ name: string, amount: number }[]>([])
+
+  // Delete Invoice state
+  const [deletingSalesBill, setDeletingSalesBill] = useState<SalesBillBreakdown | null>(null)
+
+  const [paymentInputAmount, setPaymentInputAmount] = useState<number>(0)
+  const [advanceInputAmount, setAdvanceInputAmount] = useState<number>(0)
+
+  const [buyerMobileMap, setBuyerMobileMap] = useState<Map<string, string>>(new Map())
+
+  useEffect(() => {
+    loadSessions()
+  }, [activeTab])
+
+  const loadSessions = async () => {
+    const { data: buyersData } = await supabase.from('buyers').select('name, name_te, mobile')
+    const buyerMap = new Map<string, string>()
+    const mobileMap = new Map<string, string>()
+    if (buyersData) {
+      buyersData.forEach(b => {
+        if (b.name_te) buyerMap.set(b.name, b.name_te)
+        if (b.mobile) mobileMap.set(b.name, b.mobile)
+      })
+    }
+    setBuyerMobileMap(mobileMap)
+
+    const { data } = await supabase
+      .from('sales')
+      .select('id, date, total_amount, advance, payment_status, buyer_name, partial_payment, payment_date, payment_history')
+      .order('date', { ascending: false })
+
+    if (data) {
+      let pendingSum = 0
+      let completedSum = 0
+      let activeAdvanceSum = 0
+
+      // Groups for Active Pending sessions (grouped strictly by buyer_name for pending/partially paid bills)
+      const pendingMap = new Map<string, {
+        id: string;
+        buyer_name: string;
+        date: string;
+        billsCount: number;
+        overallTotal: number;
+        advance: number;
+        bill_ids: string[];
+        partial_payment: number;
+        payment_date?: string | null;
+        payment_history: { id?: string, date: string, amount: number, remainingBalance?: number, remarks?: string }[];
+        status: 'Pending' | 'Partial Payment' | 'Completed';
+        remainingBalance: number;
+        totalPaid: number;
+      }>()
+
+      // Groups for Completed sessions (grouped by buyer_name + completion batch / date)
+      const completedMap = new Map<string, {
+        id: string;
+        buyer_name: string;
+        date: string;
+        billsCount: number;
+        overallTotal: number;
+        advance: number;
+        bill_ids: string[];
+        partial_payment: number;
+        payment_date?: string | null;
+        payment_history: { id?: string, date: string, amount: number, remainingBalance?: number, remarks?: string }[];
+        status: 'Pending' | 'Partial Payment' | 'Completed';
+        remainingBalance: number;
+        totalPaid: number;
+      }>()
+
+      data.forEach(d => {
+        const rawName = d.buyer_name || 'Unknown Buyer'
+        const displayName = lang === 'te' && buyerMap.has(rawName) ? buyerMap.get(rawName)! : rawName
+        const billAmount = Number(d.total_amount || 0)
+        const adv = Number(d.advance || 0)
+        const isCompleted = d.payment_status === 'Completed'
+
+        if (isCompleted) {
+          completedSum += billAmount
+          // Group completed bills that were completed together
+          const batchKey = (Array.isArray(d.payment_history) && d.payment_history.length > 0)
+            ? (d.payment_history[d.payment_history.length - 1] as any).id || `${d.payment_date || d.date}_${d.payment_history.length}`
+            : (d.payment_date ? `${d.payment_date}_${d.partial_payment || 0}` : d.id)
+          const key = `comp_${rawName}_${batchKey}`
+
+          if (!completedMap.has(key)) {
+            completedMap.set(key, {
+              id: key,
+              buyer_name: displayName,
+              date: d.date,
+              billsCount: 0,
+              overallTotal: 0,
+              advance: 0,
+              bill_ids: [],
+              partial_payment: 0,
+              payment_date: d.payment_date,
+              payment_history: [],
+              status: 'Completed',
+              remainingBalance: 0,
+              totalPaid: 0
+            })
+          }
+
+          const s = completedMap.get(key)!
+          s.billsCount += 1
+          s.overallTotal += billAmount
+          s.advance += adv
+          s.bill_ids.push(d.id)
+          if (new Date(d.date) > new Date(s.date)) {
+            s.date = d.date
+          }
+          if (d.payment_date && (!s.payment_date || new Date(d.payment_date) > new Date(s.payment_date))) {
+            s.payment_date = d.payment_date
+          }
+
+          if (Array.isArray(d.payment_history) && d.payment_history.length > 0) {
+            d.payment_history.forEach((h: any) => {
+              if (h && Number(h.amount) > 0 && h.date) {
+                if (h.remarks === "Advance Payment") return
+                const histKey = h.id || `${h.date}_${h.amount}`
+                if (!s.payment_history.some((ex: any) => (ex.id || `${ex.date}_${ex.amount}`) === histKey)) {
+                  s.payment_history.push(h)
+                }
+              }
+            })
+          }
+        } else {
+          // ACTIVE PENDING / PARTIAL PAYMENT BILLS
+          // Only pending bills are grouped together! Previously completed bills are strictly excluded!
+          const key = `pend_${rawName}`
+
+          if (!pendingMap.has(key)) {
+            pendingMap.set(key, {
+              id: key,
+              buyer_name: displayName,
+              date: d.date,
+              billsCount: 0,
+              overallTotal: 0,
+              advance: 0,
+              bill_ids: [],
+              partial_payment: 0,
+              payment_date: d.payment_date,
+              payment_history: [],
+              status: 'Pending',
+              remainingBalance: 0,
+              totalPaid: 0
+            })
+          }
+
+          const s = pendingMap.get(key)!
+          s.billsCount += 1
+          s.overallTotal += billAmount
+          s.advance += adv
+          s.bill_ids.push(d.id)
+          if (new Date(d.date) > new Date(s.date)) {
+            s.date = d.date
+          }
+          if (d.payment_date && (!s.payment_date || new Date(d.payment_date) > new Date(s.payment_date))) {
+            s.payment_date = d.payment_date
+          }
+
+          if (Array.isArray(d.payment_history) && d.payment_history.length > 0) {
+            d.payment_history.forEach((h: any) => {
+              if (h && Number(h.amount) > 0 && h.date) {
+                if (h.remarks === "Advance Payment") return
+                const histKey = h.id || `${h.date}_${h.amount}`
+                if (!s.payment_history.some((ex: any) => (ex.id || `${ex.date}_${ex.amount}`) === histKey)) {
+                  s.payment_history.push(h)
+                }
+              }
+            })
+          }
+        }
+      })
+
+      // Calculate totals for pending sessions
+      const pendingSessions: GroupedSaleSession[] = []
+      pendingMap.forEach(s => {
+        s.payment_history.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+        const historyPaid = s.payment_history.reduce((sum, h) => sum + Number(h.amount || 0), 0)
+        const actualPaid = historyPaid > 0 ? historyPaid : (s.partial_payment || 0)
+        const totalReceived = s.advance > 0 && s.advance !== actualPaid ? s.advance + actualPaid : Math.max(s.advance, actualPaid)
+        s.advance = totalReceived
+        s.partial_payment = totalReceived
+        s.totalPaid = totalReceived
+        s.remainingBalance = Math.max(0, Number((s.overallTotal - s.totalPaid).toFixed(2)))
+
+        if (s.remainingBalance === 0) {
+          s.status = 'Completed'
+          completedSum += s.overallTotal
+        } else {
+          s.status = s.totalPaid > 0 ? 'Partial Payment' : 'Pending'
+          pendingSum += s.remainingBalance
+          activeAdvanceSum += totalReceived
+          pendingSessions.push(s as GroupedSaleSession)
+        }
+      })
+
+      // Calculate totals for completed sessions
+      const completedSessions: GroupedSaleSession[] = []
+      completedMap.forEach(s => {
+        s.payment_history.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+        const historyPaid = s.payment_history.reduce((sum, h) => sum + Number(h.amount || 0), 0)
+        const actualPaid = historyPaid > 0 ? historyPaid : (s.overallTotal - s.advance)
+        const totalReceived = s.overallTotal
+        s.advance = totalReceived
+        s.partial_payment = actualPaid
+        s.totalPaid = s.overallTotal
+        s.remainingBalance = 0
+        s.status = 'Completed'
+        completedSessions.push(s as GroupedSaleSession)
+      })
+
+      setOverallPending(pendingSum)
+      setOverallCompleted(completedSum)
+      setOverallAdvance(activeAdvanceSum)
+
+      if (activeTab === 'Pending') {
+        setGroupedSessions(pendingSessions)
+      } else {
+        setGroupedSessions(completedSessions)
+      }
+    }
+  }
+
+  const handleCompletePaymentInitiate = (session: GroupedSaleSession) => {
+    setPaymentModal(session)
+    setPaymentInputAmount(0)
+    setAdvanceInputAmount(session.advance || 0)
+  }
+
+  const handleSavePaymentWithHistory = async (isFinalComplete: boolean = false) => {
+    if (!paymentModal) return
+    try {
+      const today = new Date().toISOString().split('T')[0]
+      const existingAdv = Number(paymentModal.advance || 0)
+      const newAdvInput = existingAdv > 0 ? existingAdv : Number(advanceInputAmount || 0)
+      const overallTotal = Number(paymentModal.overallTotal || 0)
+      
+      const existingHistory = (paymentModal.payment_history || []).filter((h: any) => h && Number(h.amount) > 0 && h.remarks !== "Advance Payment")
+      const historyPaid = existingHistory.reduce((sum: number, h: any) => sum + Number(h.amount || 0), 0)
+      const existingReceived = Math.max(existingAdv, newAdvInput, historyPaid, Number(paymentModal.partial_payment || 0))
+
+      const currentBalance = Math.max(0, Number((overallTotal - existingReceived).toFixed(2)))
+
+      let actualPay = isFinalComplete ? currentBalance : Number(paymentInputAmount || 0)
+      if (actualPay <= 0 && newAdvInput <= existingAdv && !isFinalComplete) {
+        toast.error("Please enter a valid payment amount")
+        return
+      }
+      if (actualPay > currentBalance) {
+        actualPay = currentBalance
+      }
+
+      const totalNewAdditional = existingReceived + actualPay
+      const newTotalPaid = Math.min(overallTotal, totalNewAdditional)
+      const newRemainingBalance = Math.max(0, Number((overallTotal - newTotalPaid).toFixed(2)))
+
+      let newStatus: 'Pending' | 'Partial Payment' | 'Completed' = 'Pending'
+      if (newRemainingBalance === 0 || isFinalComplete) {
+        newStatus = 'Completed'
+      } else if (newTotalPaid > 0) {
+        newStatus = 'Partial Payment'
+      }
+
+      // Create a single session-level payment transaction entry
+      const newEntry = {
+        id: crypto.randomUUID(),
+        date: today,
+        amount: actualPay,
+        remainingBalance: newRemainingBalance
+      }
+
+      const updatedHistory = actualPay > 0 
+        ? [...existingHistory.map((h: any) => ({ id: h.id || crypto.randomUUID(), date: h.date, amount: Number(h.amount), remarks: h.remarks })), newEntry]
+        : existingHistory
+
+      const updatePayload: any = {
+        payment_status: newStatus,
+        partial_payment: totalNewAdditional,
+        payment_date: today,
+        payment_history: updatedHistory
+      }
+      if (newAdvInput > 0 && existingAdv === 0) {
+        updatePayload.advance = newAdvInput
+      }
+
+      // Update all sales bills in this session as a single unified entity
+      const { error: updateError } = await supabase
+        .from('sales')
+        .update(updatePayload)
+        .in('id', paymentModal.bill_ids)
+
+      if (updateError) throw updateError
+
+      toast.success(newStatus === 'Completed' ? "Payment marked as Completed!" : "Payment saved successfully!")
+      
+      const sessionToExport: GroupedSaleSession = { 
+        ...paymentModal, 
+        advance: newTotalPaid,
+        partial_payment: totalNewAdditional, 
+        payment_date: today, 
+        status: newStatus,
+        payment_history: updatedHistory
+      }
+
+      setPaymentModal(null)
+      setPaymentInputAmount(0)
+      setAdvanceInputAmount(0)
+
+      if (newStatus === 'Completed') {
+        setExportPromptSession(sessionToExport)
+      }
+
+      await loadSessions()
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save payment")
+    }
+  }
+
+  const handleViewDetails = async (session: GroupedSaleSession) => {
+    try {
+      const bills = await fetchSalesBillBreakdowns(session, lang)
+      setDetailsModal({ session, bills })
+    } catch (err: any) {
+      toast.error("Failed to load details")
+    }
+  }
+
+  const handleEditInvoiceInitiate = (bill: SalesBillBreakdown) => {
+    setEditingInvoice(bill)
+    setEditInvoiceDate(bill.date)
+    setEditInvoiceVehicleNumber(bill.vehicleNumber || "")
+    setEditInvoiceDriverName(bill.driverName || "")
+    setEditInvoiceDriverPhone(bill.driverPhone || "")
+    setEditInvoiceRemarks(bill.remarks || "")
+    setEditInvoiceAdvance(bill.advance || 0)
+    setEditInvoicePartialPayment(bill.partial_payment || 0)
+    setEditInvoiceItems(bill.items.map(item => ({ ...item })))
+    setEditInvoiceAdditionalExpenses(Array.isArray(bill.additionalExpenses) ? bill.additionalExpenses.map(e => ({ name: e.name, amount: Number(e.amount || 0) })) : [])
+  }
+
+  const handleEditInvoiceItemChange = (index: number, field: 'quantity' | 'rate', value: number) => {
+    setEditInvoiceItems(prev => {
+      const copy = [...prev]
+      copy[index] = { ...copy[index], [field]: value }
+      copy[index].total = Number((copy[index].quantity * copy[index].rate).toFixed(2))
+      return copy
+    })
+  }
+
+  const handleAddEditInvoiceExpense = () => {
+    setEditInvoiceAdditionalExpenses(prev => [...prev, { name: "", amount: 0 }])
+  }
+
+  const handleEditInvoiceExpenseChange = (index: number, field: 'name' | 'amount', value: any) => {
+    setEditInvoiceAdditionalExpenses(prev => {
+      const copy = [...prev]
+      if (field === 'amount') {
+        copy[index] = { ...copy[index], amount: Math.max(0, Number(value) || 0) }
+      } else {
+        copy[index] = { ...copy[index], name: value }
+      }
+      return copy
+    })
+  }
+
+  const handleRemoveEditInvoiceExpense = (index: number) => {
+    setEditInvoiceAdditionalExpenses(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const handleSaveEditedInvoice = async () => {
+    if (!editingInvoice) return
+    if (editInvoiceVehicleNumber.trim() && !isValidVehicleNumber(editInvoiceVehicleNumber)) {
+      return toast.error("Please enter a valid Vehicle Number (e.g. AP 27 TX 3987)")
+    }
+    if (editInvoiceDriverName.trim() && !isValidDriverName(editInvoiceDriverName)) {
+      return toast.error("Please enter a valid Driver Name (letters, spaces, and common characters)")
+    }
+    if (editInvoiceDriverPhone.trim() && !isValidDriverPhone(editInvoiceDriverPhone)) {
+      return toast.error("Driver Phone Number must be exactly 10 digits")
+    }
+
+    for (const exp of editInvoiceAdditionalExpenses) {
+      if (Number(exp.amount) < 0) {
+        return toast.error("Expense amount cannot be negative")
+      }
+    }
+
+    try {
+      const itemsTotal = editInvoiceItems.reduce((sum, item) => sum + item.total, 0)
+      const itemsJson = editInvoiceItems.reduce((acc, curr) => ({
+        ...acc,
+        [curr.name]: curr
+      }), {})
+
+      const formattedExpenses = editInvoiceAdditionalExpenses
+        .filter(e => e.name.trim() || Number(e.amount) > 0)
+        .map(e => ({ name: e.name.trim() || 'Expense', amount: Number(e.amount) || 0 }))
+      const expensesTotal = formattedExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0)
+      const totalAmount = Number((itemsTotal + expensesTotal).toFixed(2))
+
+      const advVal = Number(editInvoiceAdvance || 0)
+      const formattedVehicle = editInvoiceVehicleNumber.trim() ? formatVehicleNumber(editInvoiceVehicleNumber) : null
+
+      const updatePayload: any = {
+        date: editInvoiceDate,
+        vehicle_number: formattedVehicle,
+        driver_name: editInvoiceDriverName.trim() || null,
+        driver_phone: editInvoiceDriverPhone.trim().replace(/\D/g, '') || null,
+        total_amount: totalAmount,
+        advance: advVal,
+        remarks: editInvoiceRemarks,
+        partial_payment: editingInvoice.partial_payment || 0,
+        payment_status: editingInvoice.payment_status || 'Pending',
+        items: {
+          ...itemsJson,
+          ...(formattedExpenses.length > 0 ? { _additional_expenses: formattedExpenses } : {})
+        },
+        additional_expenses: formattedExpenses
+      }
+
+      let { error } = await supabase
+        .from('sales')
+        .update(updatePayload)
+        .eq('id', editingInvoice.id)
+
+      if (error && (error.message?.includes('additional_expenses') || error.code === 'PGRST204')) {
+        delete updatePayload.additional_expenses
+        const retry = await supabase.from('sales').update(updatePayload).eq('id', editingInvoice.id)
+        error = retry.error
+      }
+
+      if (error) throw error
+
+      toast.success("Sales Invoice updated successfully!")
+      setEditingInvoice(null)
+
+      await loadSessions()
+
+      if (detailsModal) {
+        const { data: updatedSales } = await supabase
+          .from('sales')
+          .select('total_amount')
+          .in('id', detailsModal.session.bill_ids)
+
+        const newOverallTotal = updatedSales?.reduce((sum, s) => sum + s.total_amount, 0) || 0
+
+        const updatedSession = {
+          ...detailsModal.session,
+          overallTotal: newOverallTotal
+        }
+
+        const bills = await fetchSalesBillBreakdowns(updatedSession, lang)
+        setDetailsModal({ session: updatedSession, bills })
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to update invoice")
+    }
+  }
+
+  const handleConfirmDeleteSalesBill = async () => {
+    if (!deletingSalesBill) return
+    const billToDelete = deletingSalesBill
+    setDeletingSalesBill(null)
+
+    try {
+      // 1. Fetch full sale record and sale_items
+      const { data: saleData } = await supabase
+        .from('sales')
+        .select('*')
+        .eq('id', billToDelete.id)
+        .single()
+
+      const { data: itemsData } = await supabase
+        .from('sale_items')
+        .select('*')
+        .eq('sale_id', billToDelete.id)
+
+      if (!saleData) throw new Error("Sale record not found")
+
+      // 2. Add to Recycle Bin
+      const buyerName = detailsModal?.session.buyer_name || saleData.buyer_name || 'Buyer'
+      await addToRecycleBin({
+        id: crypto.randomUUID(),
+        type: 'sale_bill',
+        item_id: billToDelete.id || saleData.id || '',
+        title: `Invoice #${billToDelete.invoiceNumber || 'N/A'} - ${buyerName}`,
+        shop_name: buyerName,
+        bill_number: String(billToDelete.invoiceNumber || ''),
+        amount: billToDelete.grandTotal,
+        data: {
+          sale: saleData,
+          sale_items: itemsData || []
+        },
+        deleted_at: new Date().toISOString()
+      })
+
+      // 3. Delete sale_items and sales row from Supabase
+      await supabase.from('sale_items').delete().eq('sale_id', billToDelete.id)
+      await supabase.from('sales').delete().eq('id', billToDelete.id)
+
+      toast.success("Invoice moved to Recycle Bin!")
+
+      // 4. Reload main list & cards
+      await loadSessions()
+
+      // 5. Update or close detailsModal
+      if (detailsModal) {
+        const remainingBillIds = detailsModal.session.bill_ids.filter(id => id !== billToDelete.id)
+        if (remainingBillIds.length === 0) {
+          setDetailsModal(null)
+        } else {
+          const { data: remainingSales } = await supabase
+            .from('sales')
+            .select('total_amount')
+            .in('id', remainingBillIds)
+
+          const newOverallTotal = remainingSales?.reduce((sum, s) => sum + Number(s.total_amount || 0), 0) || 0
+
+          const updatedSession = {
+            ...detailsModal.session,
+            overallTotal: newOverallTotal,
+            bill_ids: remainingBillIds
+          }
+
+          const bills = await fetchSalesBillBreakdowns(updatedSession, lang)
+          setDetailsModal({ session: updatedSession, bills })
+        }
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to delete invoice")
+    }
+  }
+
+  const filteredSessions = groupedSessions.filter(s => 
+    s.buyer_name.toLowerCase().includes(searchQuery.toLowerCase())
+  )
+
+  return (
+    <div className="max-w-6xl mx-auto space-y-6">
+      <div className="flex justify-between items-center">
+        <h1 className="text-2xl font-bold">{t("salesPayments", lang)}</h1>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-card p-6 rounded-xl border shadow-sm flex items-center space-x-4">
+          <div className="p-3 rounded-lg bg-orange-100 dark:bg-orange-950">
+            <Clock className="w-6 h-6 text-orange-500" />
+          </div>
+          <div>
+            <p className="text-sm font-medium text-muted-foreground">
+              {lang === 'te' ? "మొత్తం పెండింగ్ అమౌంట్" : "Overall Pending Amount"}
+            </p>
+            <h3 className="text-2xl font-bold text-foreground mt-1">
+              ₹{formatInr(overallPending)}
+            </h3>
+          </div>
+        </div>
+
+        <div className="bg-card p-6 rounded-xl border shadow-sm flex items-center space-x-4">
+          <div className="p-3 rounded-lg bg-green-100 dark:bg-green-950">
+            <CheckCircle2 className="w-6 h-6 text-green-500" />
+          </div>
+          <div>
+            <p className="text-sm font-medium text-muted-foreground">
+              {lang === 'te' ? "మొత్తం పూర్తయిన అమౌంట్" : "Overall Completed Amount"}
+            </p>
+            <h3 className="text-2xl font-bold text-foreground mt-1">
+              ₹{formatInr(overallCompleted)}
+            </h3>
+          </div>
+        </div>
+
+        <div className="bg-card p-6 rounded-xl border shadow-sm flex items-center space-x-4">
+          <div className="p-3 rounded-lg bg-purple-100 dark:bg-purple-950">
+            <Wallet className="w-6 h-6 text-purple-600" />
+          </div>
+          <div>
+            <p className="text-sm font-medium text-muted-foreground">
+              {lang === 'te' ? "మొత్తం ఆడ్వాన్స్" : "Overall Advance Received"}
+            </p>
+            <h3 className="text-2xl font-bold text-foreground mt-1">
+              ₹{formatInr(overallAdvance)}
+            </h3>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex justify-between items-center border-b pb-4">
+        <div className="flex gap-2">
+          <button
+            onClick={() => setActiveTab('Pending')}
+            className={`px-5 py-2.5 rounded-lg font-medium text-sm flex items-center transition-colors ${
+              activeTab === 'Pending' 
+                ? 'bg-orange-100 text-orange-700' 
+                : 'text-muted-foreground hover:bg-muted'
+            }`}
+          >
+            <Clock className="w-4 h-4 mr-2" /> {t("pendingPayments", lang)}
+          </button>
+          <button
+            onClick={() => setActiveTab('Completed')}
+            className={`px-5 py-2.5 rounded-lg font-medium text-sm flex items-center transition-colors ${
+              activeTab === 'Completed' 
+                ? 'bg-green-100 text-green-700' 
+                : 'text-muted-foreground hover:bg-muted'
+            }`}
+          >
+            <CheckCircle2 className="w-4 h-4 mr-2" /> {t("completedPayments", lang)}
+          </button>
+        </div>
+
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground w-4 h-4" />
+          <input 
+            type="text" 
+            placeholder={t("searchBuyer", lang)} 
+            className="pl-9 pr-4 py-2 border rounded-lg text-sm w-64"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="bg-card border rounded-xl shadow-sm overflow-hidden min-h-[500px]">
+        <div className="overflow-x-auto p-4">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-muted">
+              <tr>
+                <th className="px-4 py-3 font-semibold w-16">S.No.</th>
+                <th className="px-4 py-3 font-semibold">{t("addBuyer", lang).replace("New ", "")}</th>
+                <th className="px-4 py-3 font-semibold text-center">{t("invoiceCount", lang)}</th>
+                <th className="px-4 py-3 font-semibold">{t("latestDate", lang)}</th>
+                <th className="px-4 py-3 font-semibold text-right">{t("overallAmount", lang)}</th>
+                <th className="px-4 py-3 font-semibold text-center">{t("status", lang)}</th>
+                <th className="px-4 py-3 font-semibold text-right">{t("actions", lang)}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredSessions.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No {activeTab.toLowerCase()} payments found.</td></tr>
+              ) : (
+                filteredSessions.map((session, index) => (
+                  <tr key={session.id} className="border-b hover:bg-muted/10 transition-colors">
+                    <td className="px-4 py-4 text-muted-foreground">{index + 1}</td>
+                    <td className="px-4 py-4 font-semibold text-primary">{session.buyer_name}</td>
+                    <td className="px-4 py-4 text-center">
+                      <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold">{session.billsCount}</span>
+                    </td>
+                    <td className="px-4 py-4">{formatDate(session.date)}</td>
+                    <td className="px-4 py-4 text-right font-bold text-[15px]">₹{formatInr(session.overallTotal)}</td>
+                    <td className="px-4 py-4 text-center">
+                      {session.status === 'Completed' ? (
+                        <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-semibold">Completed</span>
+                      ) : session.status === 'Partial Payment' ? (
+                        <span className="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-semibold">Partial Payment</span>
+                      ) : (
+                        <span className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-semibold">Pending</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex items-center justify-end gap-2">
+                        {session.status !== 'Completed' && session.billsCount >= 2 && (
+                          <button 
+                            onClick={() => {
+                              setSalesGroupExportPrompt({
+                                session,
+                                label: lang === 'te' ? "కంబైన్డ్ ఇన్వాయిస్" : "Combined Invoice"
+                              })
+                            }}
+                            className="bg-purple-100 hover:bg-purple-200 text-purple-700 px-3 py-1.5 rounded flex items-center text-xs font-semibold shadow-sm transition-colors"
+                          >
+                            {lang === 'te' ? "కంబైన్డ్ బిల్లు" : "Combined Bill"}
+                          </button>
+                        )}
+
+                        <button 
+                          onClick={() => handleViewDetails(session)} 
+                          className="text-slate-600 hover:bg-slate-100 px-3 py-1.5 rounded flex items-center text-xs font-medium"
+                        >
+                          <Eye className="w-3.5 h-3.5 mr-1" /> {t("viewDetails", lang)}
+                        </button>
+
+                        {session.status !== 'Completed' && (
+                          <button 
+                            onClick={() => handleCompletePaymentInitiate(session)} 
+                            className="bg-primary hover:bg-primary/90 text-primary-foreground px-3 py-1.5 rounded shadow-sm flex items-center text-xs font-medium ml-1"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5 mr-1" /> {t("receivePayment", lang)}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Details Modal */}
+      {detailsModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-background w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl shadow-xl flex flex-col">
+            <div className="p-5 border-b flex justify-between items-center sticky top-0 bg-background z-10">
+              <div>
+                <h2 className="text-xl font-bold">Session Details</h2>
+                <p className="text-sm text-muted-foreground">
+                  {detailsModal.session.buyer_name}
+                  {buyerMobileMap.get(detailsModal.session.buyer_name) ? ` • Phone: ${buyerMobileMap.get(detailsModal.session.buyer_name)}` : ''} 
+                  • {formatDate(detailsModal.session.date)}
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-sm text-muted-foreground">Overall Amount</div>
+                <div className="text-2xl font-bold text-primary">₹{formatInr(detailsModal.session.overallTotal)}</div>
+              </div>
+            </div>
+            
+            <div className="p-6 space-y-6 bg-slate-50 flex-1">
+              <div className="space-y-4">
+                {detailsModal.bills.map((bill, index) => (
+                  <div key={index} className="bg-card border rounded-lg overflow-hidden shadow-sm">
+                    <div className="bg-slate-100 px-4 py-2 border-b flex justify-between items-center font-semibold">
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span>Invoice {index + 1} {bill.invoiceNumber ? `(#${bill.invoiceNumber})` : ''} {bill.vehicleNumber ? `• Vehicle: ${bill.vehicleNumber}` : ''} • Date: {formatDate(bill.date || detailsModal.session.date)}</span>
+                          {detailsModal.session.status !== 'Completed' && (
+                            <button
+                              onClick={() => handleEditInvoiceInitiate(bill)}
+                              className="text-blue-600 hover:text-blue-800 text-xs px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-colors font-bold flex items-center gap-1"
+                            >
+                              <Edit2 className="w-3 h-3" /> Edit
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setDeletingSalesBill(bill)}
+                            className="text-red-600 hover:text-red-800 text-xs px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 border border-red-200 transition-colors font-bold flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" /> Delete
+                          </button>
+                        </div>
+                        <div className="text-xs text-muted-foreground font-normal mt-0.5">
+                          Driver: <span className="font-semibold text-slate-700">{bill.driverName || '-'}</span>
+                          <span className="mx-2">•</span>
+                          Driver Phone: <span className="font-semibold text-slate-700">{bill.driverPhone || '-'}</span>
+                        </div>
+                      </div>
+                      <span>₹{formatInr(bill.grandTotal)}</span>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead className="text-muted-foreground border-b text-left">
+                            <tr>
+                              <th className="pb-2 w-12">S.No.</th>
+                              <th className="pb-2">Item</th>
+                              <th className="pb-2 text-center">Qty</th>
+                              <th className="pb-2 text-right">Rate</th>
+                              <th className="pb-2 text-right">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {bill.items.filter(i => i.quantity > 0).map((item, i) => (
+                              <tr key={i}>
+                                <td className="py-2 text-muted-foreground">{i + 1}</td>
+                                <td className="py-2">{item.name}</td>
+                                <td className="py-2 text-center">{formatQuantity(item.name, item.quantity, (item as any).unit)}</td>
+                                <td className="py-2 text-right">₹{item.rate}</td>
+                                <td className="py-2 text-right font-medium">₹{formatInr(item.total)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Additional Expenses in Details */}
+                      {Array.isArray(bill.additionalExpenses) && bill.additionalExpenses.length > 0 && (
+                        <div className="border-t pt-3 bg-slate-50 p-3 rounded-lg space-y-2">
+                          <div className="flex justify-between items-center text-xs font-semibold text-muted-foreground">
+                            <span>{t("itemsTotal", lang)}:</span>
+                            <span className="font-bold text-slate-700">₹{formatInr(bill.itemsTotal || bill.items.reduce((s, i) => s + i.total, 0))}</span>
+                          </div>
+                          
+                          <div className="space-y-1">
+                            <span className="text-xs font-bold text-purple-700 block uppercase tracking-wider">{t("additionalExpenses", lang)}</span>
+                            {bill.additionalExpenses.map((exp, expIdx) => (
+                              <div key={expIdx} className="flex justify-between text-xs text-slate-600 pl-2">
+                                <span>• {exp.name}</span>
+                                <span className="font-medium">₹{formatInr(exp.amount)}</span>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="border-t pt-1.5 flex justify-between items-center text-xs font-bold text-slate-700">
+                            <span>{t("additionalExpensesTotal", lang)}:</span>
+                            <span className="text-purple-700">+ ₹{formatInr(bill.additionalExpensesTotal || 0)}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Session Payment Summary & Payment History */}
+                {(() => {
+                  const totalAdv = Number(detailsModal.session.advance || 0)
+                  const grandTotal = Number(detailsModal.session.overallTotal || 0)
+                  const balance = Math.max(0, Number((grandTotal - totalAdv).toFixed(2)))
+                  const status = detailsModal.session.status
+
+                  return (
+                    <div className="bg-card border rounded-lg overflow-hidden shadow-sm p-4 space-y-4">
+                      <div className="flex justify-between items-center border-b pb-2">
+                        <h3 className="font-bold text-sm text-foreground uppercase tracking-wider">
+                          {lang === 'te' ? "చెల్లింపు సారాంశం" : "Payment Summary"}
+                        </h3>
+                        <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
+                          status === 'Completed' ? 'bg-green-100 text-green-700' :
+                          status === 'Partial Payment' ? 'bg-orange-100 text-orange-700' :
+                          'bg-amber-100 text-amber-700'
+                        }`}>
+                          {status}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                        <div className="bg-slate-50 p-2.5 rounded-lg border">
+                          <span className="text-xs text-muted-foreground block">{t("overallTotal", lang)}</span>
+                          <span className="font-bold text-sm text-foreground">₹{formatInr(grandTotal)}</span>
+                        </div>
+                        <div className="bg-slate-50 p-2.5 rounded-lg border">
+                          <span className="text-xs text-muted-foreground block">{t("advance", lang)}</span>
+                          <span className="font-bold text-sm text-purple-600">₹{formatInr(totalAdv)}</span>
+                        </div>
+                        <div className="bg-slate-50 p-2.5 rounded-lg border">
+                          <span className="text-xs text-muted-foreground block">{t("amountPaid", lang)}</span>
+                          <span className="font-bold text-sm text-green-600">₹{formatInr(totalAdv)}</span>
+                        </div>
+                        <div className="bg-slate-50 p-2.5 rounded-lg border">
+                          <span className="text-xs text-muted-foreground block">{t("balanceAmount", lang)}</span>
+                          <span className={`font-bold text-sm ${balance > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                            ₹{formatInr(balance)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Session Payment History Table */}
+                      {Array.isArray(detailsModal.session.payment_history) && detailsModal.session.payment_history.length > 0 && (
+                        <div className="space-y-2 border-t pt-3">
+                          <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">{t("paymentHistorySection", lang)}</h4>
+                          <div className="border rounded-lg overflow-hidden text-xs bg-background">
+                            <table className="w-full text-left">
+                              <thead className="bg-slate-100 font-semibold text-slate-600">
+                                <tr>
+                                  <th className="p-2 w-12">#</th>
+                                  <th className="p-2">Date</th>
+                                  <th className="p-2 text-right">Amount Paid</th>
+                                  <th className="p-2 text-right">Running Balance</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {detailsModal.session.payment_history.map((h, hIdx) => (
+                                  <tr key={hIdx} className="border-t">
+                                    <td className="p-2 text-muted-foreground">{hIdx + 1}</td>
+                                    <td className="p-2">{formatDate(h.date)}</td>
+                                    <td className="p-2 text-right font-bold text-green-600">₹{formatInr(h.amount)}</td>
+                                    <td className="p-2 text-right font-medium text-slate-700">₹{formatInr(h.remainingBalance || 0)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
+              </div>
+            </div>
+
+            <div className="p-4 border-t bg-background flex items-center justify-end gap-3 sticky bottom-0 z-10">
+              <button
+                onClick={() => generateSalesCombinedPDF(detailsModal.session, 'download', lang, detailsModal.bills)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg font-medium text-sm flex items-center transition-colors border"
+              >
+                <Download className="w-4 h-4 mr-1.5" /> Download PDF
+              </button>
+
+              <button
+                onClick={() => generateSalesCombinedPDF(detailsModal.session, 'print', lang, detailsModal.bills)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg font-medium text-sm flex items-center transition-colors border"
+              >
+                <Printer className="w-4 h-4 mr-1.5" /> Print Bill
+              </button>
+
+              <button
+                onClick={() => shareSalesWhatsApp(detailsModal.session, lang, detailsModal.bills)}
+                className="px-4 py-2 bg-green-50 text-green-700 hover:bg-green-100 rounded-lg font-medium text-sm flex items-center transition-colors border border-green-200"
+              >
+                <Share2 className="w-4 h-4 mr-1.5" /> Share via WhatsApp
+              </button>
+
+              <button 
+                onClick={() => setDetailsModal(null)} 
+                className="px-6 py-2 border rounded-lg font-medium hover:bg-muted ml-2"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Completion / Record Partial Payment Modal */}
+      {paymentModal && (() => {
+        const existingAdv = Number(paymentModal.advance || 0)
+        const hasExistingAdv = existingAdv > 0
+        const effectiveAdv = hasExistingAdv ? existingAdv : Number(advanceInputAmount || 0)
+        const additionalInput = Number(paymentInputAmount || 0)
+        const grandTotal = Number(paymentModal.overallTotal || 0)
+        const totalPaid = Math.min(grandTotal, effectiveAdv + additionalInput)
+        const remainingBalance = Math.max(0, Number((grandTotal - totalPaid).toFixed(2)))
+
+        let statusText = 'Pending'
+        if (remainingBalance === 0) statusText = 'Completed'
+        else if (totalPaid > 0) statusText = 'Partial Payment'
+
+        return (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+            <div className="bg-background w-full max-w-lg rounded-2xl shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-5 border-b bg-slate-50 flex justify-between items-center sticky top-0 bg-background z-10">
+                <div>
+                  <h2 className="text-xl font-bold">{t("paymentSummary", lang)}</h2>
+                  <p className="text-xs text-muted-foreground">
+                    {paymentModal.buyer_name}
+                    {buyerMobileMap.get(paymentModal.buyer_name) ? ` • Phone: ${buyerMobileMap.get(paymentModal.buyer_name)}` : ''} 
+                    • {paymentModal.date}
+                  </p>
+                </div>
+                <button onClick={() => setPaymentModal(null)} className="text-slate-400 hover:text-slate-600 text-lg font-medium">✕</button>
+              </div>
+              
+              <div className="p-6 space-y-5 overflow-y-auto flex-1">
+                {/* Real-time breakdown metrics */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border text-center">
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">{t("overallTotal", lang)}</p>
+                    <p className="text-base font-bold text-slate-800">₹{formatInr(grandTotal)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">{t("advance", lang)}</p>
+                    <p className="text-base font-bold text-purple-600">₹{formatInr(effectiveAdv)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">Additional Paid</p>
+                    <p className="text-base font-bold text-blue-600">₹{formatInr(additionalInput)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">{t("amountPaid", lang)}</p>
+                    <p className="text-base font-bold text-green-600">₹{formatInr(totalPaid)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">{t("balanceAmount", lang)}</p>
+                    <p className="text-base font-bold text-red-600">₹{formatInr(remainingBalance)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">Status</p>
+                    <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded mt-1 ${
+                      statusText === 'Completed' ? 'bg-green-100 text-green-700' :
+                      statusText === 'Partial Payment' ? 'bg-orange-100 text-orange-700' :
+                      'bg-amber-100 text-amber-700'
+                    }`}>
+                      {statusText}
+                    </span>
+                  </div>
+                </div>
+                
+                {/* Advance Amount Field */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="block font-medium text-xs text-slate-700">Advance Amount (₹)</label>
+                    {hasExistingAdv && (
+                      <span className="bg-purple-100 text-purple-700 text-[10px] font-bold px-1.5 py-0.5 rounded">
+                        Recorded (Read-Only)
+                      </span>
+                    )}
+                  </div>
+                  {hasExistingAdv ? (
+                    <input 
+                      type="number" 
+                      className="w-full border p-2.5 rounded-lg text-base font-semibold bg-slate-100 text-purple-800"
+                      value={existingAdv}
+                      disabled
+                      readOnly
+                    />
+                  ) : (
+                    <input 
+                      type="number"
+                      step="0.01" 
+                      className="w-full border p-2.5 rounded-lg text-base font-semibold bg-background"
+                      value={advanceInputAmount || ''}
+                      onChange={e => setAdvanceInputAmount(Number(e.target.value))}
+                      placeholder="Enter advance amount (optional)"
+                    />
+                  )}
+                  {hasExistingAdv && (
+                    <p className="text-[11px] text-muted-foreground italic">
+                      Advance payment already recorded. Only additional partial payments are allowed.
+                    </p>
+                  )}
+                </div>
+
+                {/* Additional Payment Field */}
+                <div className="space-y-1">
+                  <label className="block font-medium text-xs text-slate-700">
+                    Enter Additional Payment Amount Received Today (₹)
+                  </label>
+                  <input 
+                    type="number" 
+                    step="0.01"
+                    className="w-full border p-2.5 rounded-lg text-lg font-semibold bg-background"
+                    value={paymentInputAmount || ''}
+                    onChange={e => setPaymentInputAmount(Number(e.target.value))}
+                    placeholder={`Max ₹${formatInr(remainingBalance)}`}
+                  />
+                </div>
+
+                {/* Payment History Preview */}
+                {Array.isArray(paymentModal.payment_history) && paymentModal.payment_history.length > 0 && (
+                  <div className="space-y-2 border-t pt-3">
+                    <h3 className="text-sm font-bold text-slate-800">{t("paymentHistorySection", lang)}</h3>
+                    <div className="border rounded-lg overflow-hidden text-xs">
+                      <table className="w-full text-left">
+                        <thead className="bg-slate-100 font-semibold text-slate-600">
+                          <tr>
+                            <th className="p-2">#</th>
+                            <th className="p-2">Date</th>
+                            <th className="p-2 text-right font-semibold">Amount Paid</th>
+                            <th className="p-2 text-right font-semibold">Running Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {paymentModal.payment_history.map((h, i) => (
+                            <tr key={i} className="border-t">
+                              <td className="p-2 text-muted-foreground">{i + 1}</td>
+                              <td className="p-2">
+                                {formatDate(h.date)}
+                                {h.remarks === "Advance Payment" && (
+                                  <span className="ml-1.5 bg-purple-100 text-purple-700 text-[10px] font-bold px-1.5 py-0.5 rounded">Advance</span>
+                                )}
+                              </td>
+                              <td className="p-2 text-right font-bold text-green-600">₹{formatInr(h.amount)}</td>
+                              <td className="p-2 text-right font-medium text-slate-700">₹{formatInr(h.remainingBalance || 0)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-t flex flex-col gap-2 bg-slate-50">
+                <button 
+                  onClick={() => handleSavePaymentWithHistory(false)} 
+                  className="w-full bg-orange-100 text-orange-700 py-3 rounded-xl font-semibold hover:bg-orange-200 transition-colors"
+                >
+                  Save Payment
+                </button>
+                <button 
+                  onClick={() => handleSavePaymentWithHistory(true)} 
+                  className="w-full bg-primary text-primary-foreground py-3 rounded-xl font-semibold hover:bg-primary/90 transition-colors shadow-sm flex justify-center items-center"
+                >
+                  <CheckCircle2 className="w-5 h-5 mr-2" /> Complete Payment
+                </button>
+                <button 
+                  onClick={() => setPaymentModal(null)} 
+                  className="w-full py-2 text-sm text-slate-500 hover:text-slate-700 font-medium mt-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Post-Completion Export Prompt */}
+      {exportPromptSession && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-background w-full max-w-sm rounded-2xl shadow-xl overflow-hidden flex flex-col items-center p-8 text-center">
+            <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4">
+              <CheckCircle2 className="w-8 h-8" />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">Payment Completed!</h2>
+            <p className="text-muted-foreground text-sm mb-8">The payment has been marked as completed successfully.</p>
+            
+            <div className="w-full flex flex-col gap-3">
+              <button onClick={() => generateSalesCombinedPDF(exportPromptSession, 'download', lang)} className="w-full flex items-center justify-center py-3 bg-slate-100 hover:bg-slate-200 rounded-xl font-medium transition-colors">
+                <Download className="w-5 h-5 mr-2" /> {t("downloadPdf", lang)}
+              </button>
+              <button onClick={() => generateSalesCombinedPDF(exportPromptSession, 'print', lang)} className="w-full flex items-center justify-center py-3 bg-slate-100 hover:bg-slate-200 rounded-xl font-medium transition-colors">
+                <Printer className="w-5 h-5 mr-2" /> {t("print", lang)}
+              </button>
+              <button onClick={() => shareSalesWhatsApp(exportPromptSession, lang)} className="w-full flex items-center justify-center py-3 bg-green-50 text-green-700 hover:bg-green-100 rounded-xl font-medium transition-colors">
+                <Share2 className="w-5 h-5 mr-2" /> {t("whatsAppShare", lang)}
+              </button>
+              <button onClick={() => setExportPromptSession(null)} className="w-full py-2 text-sm text-slate-500 hover:text-slate-700 font-medium mt-2">
+                {t("close", lang)}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Invoice Modal */}
+      {editingInvoice && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-background w-full max-w-lg rounded-2xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b bg-slate-50 flex justify-between items-center sticky top-0 bg-background z-10">
+              <div>
+                <h2 className="text-xl font-bold">Edit Invoice</h2>
+                <p className="text-xs text-muted-foreground">{editingInvoice.invoiceNumber ? `Invoice #${editingInvoice.invoiceNumber}` : 'Edit Invoice'}</p>
+              </div>
+              <button onClick={() => setEditingInvoice(null)} className="text-slate-400 hover:text-slate-600 text-lg font-medium">✕</button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4 flex-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1">Date</label>
+                  <input 
+                    type="date"
+                    className="w-full border p-2 rounded text-sm"
+                    value={editInvoiceDate}
+                    onChange={e => setEditInvoiceDate(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1">Vehicle Number</label>
+                  <input 
+                    type="text"
+                    placeholder="AP 37 TD 5799"
+                    className="w-full border p-2 rounded text-sm uppercase font-semibold tracking-wide bg-background"
+                    value={editInvoiceVehicleNumber}
+                    onChange={e => setEditInvoiceVehicleNumber(formatVehicleNumber(e.target.value))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1">{t("driverName", lang)}</label>
+                  <input 
+                    type="text"
+                    placeholder="Enter driver name"
+                    className="w-full border p-2 rounded text-sm bg-background"
+                    value={editInvoiceDriverName}
+                    onChange={e => setEditInvoiceDriverName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1">{t("driverPhone", lang)}</label>
+                  <input 
+                    type="tel" 
+                    maxLength={10}
+                    placeholder="10 digit phone number" 
+                    className="w-full border p-2 rounded text-sm bg-background font-mono" 
+                    value={editInvoiceDriverPhone} 
+                    onChange={e => setEditInvoiceDriverPhone(e.target.value.replace(/\D/g, '').slice(0, 10))} 
+                  />
+                </div>
+              </div>
+
+              {/* Items Section */}
+              <div className="space-y-2 border-t pt-3">
+                <h3 className="text-sm font-bold text-slate-800 mb-1">Items Breakdown</h3>
+                <div className="bg-slate-50 p-3 rounded-lg border space-y-3">
+                  <div className="grid grid-cols-3 gap-2 text-xs font-bold text-slate-500 border-b pb-1">
+                    <div>Item</div>
+                    <div className="text-center">Qty</div>
+                    <div className="text-center">Rate (₹)</div>
+                  </div>
+                  {editInvoiceItems.map((item, idx) => (
+                    <div key={idx} className="grid grid-cols-3 gap-2 items-center">
+                      <div className="text-xs font-medium text-slate-800 truncate">{item.name}</div>
+                      <input 
+                        type="number" 
+                        className="border p-1 rounded text-xs text-center font-medium bg-background" 
+                        value={item.quantity || ''} 
+                        onChange={e => handleEditInvoiceItemChange(idx, 'quantity', Number(e.target.value))} 
+                        placeholder="0" 
+                      />
+                      <input 
+                        type="number" 
+                        step="0.01" 
+                        className="border p-1 rounded text-xs text-center font-medium bg-background" 
+                        value={item.rate || ''} 
+                        onChange={e => handleEditInvoiceItemChange(idx, 'rate', Number(e.target.value))} 
+                        placeholder="0.00" 
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Additional Expenses Section in Edit Invoice Modal */}
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-sm font-bold text-slate-800">{t("additionalExpenses", lang)}</h3>
+                  <button 
+                    type="button"
+                    onClick={handleAddEditInvoiceExpense}
+                    className="text-xs bg-primary text-primary-foreground px-2.5 py-1 rounded font-medium hover:bg-primary/90 transition-colors shadow-sm flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> {t("addExpense", lang)}
+                  </button>
+                </div>
+
+                <datalist id="edit-expense-suggestions">
+                  <option value="Van Charges" />
+                  <option value="Loading Charges" />
+                  <option value="Loading Workers Wages" />
+                  <option value="Transport Charges" />
+                  <option value="Driver Charges" />
+                  <option value="Other Expenses" />
+                </datalist>
+
+                <div className="bg-slate-50 p-3 rounded-lg border space-y-2">
+                  {editInvoiceAdditionalExpenses.map((exp, expIdx) => (
+                    <div key={expIdx} className="flex items-center gap-2">
+                      <input 
+                        type="text" 
+                        list="edit-expense-suggestions"
+                        placeholder="Expense Name (e.g. Van Charges)"
+                        className="flex-1 border p-1.5 rounded text-xs bg-background"
+                        value={exp.name}
+                        onChange={e => handleEditInvoiceExpenseChange(expIdx, 'name', e.target.value)}
+                      />
+                      <div className="w-28 flex items-center gap-1">
+                        <span className="text-xs font-bold text-muted-foreground">₹</span>
+                        <input 
+                          type="number" 
+                          min="0" 
+                          step="0.01" 
+                          placeholder="0.00" 
+                          className="w-full border p-1.5 rounded text-xs text-right font-semibold bg-background" 
+                          value={exp.amount || ''} 
+                          onChange={e => handleEditInvoiceExpenseChange(expIdx, 'amount', e.target.value)} 
+                        />
+                      </div>
+                      <button 
+                        type="button"
+                        onClick={() => handleRemoveEditInvoiceExpense(expIdx)}
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded transition-colors"
+                        title={t("delete", lang)}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {editInvoiceAdditionalExpenses.length === 0 && (
+                    <div className="text-center py-2 text-xs text-muted-foreground">
+                      No additional expenses added. Click "+ Add Expense" to add.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="border-t pt-3 grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1">Advance Amount (₹)</label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    className="w-full border p-2 rounded text-sm font-semibold bg-background" 
+                    value={editInvoiceAdvance || ''} 
+                    onChange={e => setEditInvoiceAdvance(Number(e.target.value))} 
+                    placeholder="0.00" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1">Additional Paid (₹)</label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    className="w-full border p-2 rounded text-sm font-semibold bg-background" 
+                    value={editInvoicePartialPayment || ''} 
+                    onChange={e => setEditInvoicePartialPayment(Number(e.target.value))} 
+                    placeholder="0.00" 
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1">Remarks</label>
+                <textarea 
+                  className="w-full border p-2 rounded text-xs" 
+                  rows={2} 
+                  value={editInvoiceRemarks} 
+                  onChange={e => setEditInvoiceRemarks(e.target.value)} 
+                  placeholder="Enter remarks..." 
+                />
+              </div>
+
+              {(() => {
+                const editItemsTotal = editInvoiceItems.reduce((sum, item) => sum + item.total, 0)
+                const editExpensesTotal = editInvoiceAdditionalExpenses.reduce((sum, exp) => sum + (Number(exp.amount) || 0), 0)
+                const editGrandTotal = Number((editItemsTotal + editExpensesTotal).toFixed(2))
+
+                return (
+                  <div className="bg-slate-100 p-3 rounded-lg border space-y-1.5 text-sm font-semibold">
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>{t("itemsTotal", lang)}:</span>
+                      <span>₹{formatInr(editItemsTotal)}</span>
+                    </div>
+                    {editExpensesTotal > 0 && (
+                      <div className="flex justify-between text-xs text-purple-700">
+                        <span>{t("additionalExpensesTotal", lang)}:</span>
+                        <span>+ ₹{formatInr(editExpensesTotal)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-primary text-base font-bold border-t pt-1">
+                      <span>{t("grandTotal", lang)}:</span>
+                      <span>₹{formatInr(editGrandTotal)}</span>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+
+            <div className="p-4 border-t bg-slate-50 flex gap-3">
+              <button 
+                onClick={() => setEditingInvoice(null)} 
+                className="flex-1 py-2.5 border rounded-xl font-semibold hover:bg-slate-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleSaveEditedInvoice} 
+                className="flex-1 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:bg-primary/90 transition-colors shadow-sm"
+              >
+                Save Updates
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sales Combined Export Prompt Modal */}
+      {salesGroupExportPrompt && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-background w-full max-w-sm rounded-2xl shadow-xl overflow-hidden flex flex-col items-center p-8 text-center">
+            <div className="w-16 h-16 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mb-4">
+              <Printer className="w-8 h-8" />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">{salesGroupExportPrompt.label}</h2>
+            <p className="text-muted-foreground text-sm mb-8">
+              {lang === 'te' 
+                ? "కంబైన్డ్ పిడిఎఫ్ ని డౌన్‌లోడ్ చేయండి, ప్రింట్ చేయండి లేదా షేర్ చేయండి." 
+                : "Download, print, or share the combined PDF for this customer."}
+            </p>
+            
+            <div className="w-full flex flex-col gap-3">
+              <button 
+                onClick={() => generateSalesCombinedPDF(salesGroupExportPrompt.session, 'download', lang)} 
+                className="w-full flex items-center justify-center py-3 bg-slate-100 hover:bg-slate-200 rounded-xl font-medium transition-colors"
+              >
+                <Download className="w-5 h-5 mr-2" /> {lang === 'te' ? "డౌన్‌లోడ్ PDF" : "Download PDF"}
+              </button>
+              <button 
+                onClick={() => generateSalesCombinedPDF(salesGroupExportPrompt.session, 'print', lang)} 
+                className="w-full flex items-center justify-center py-3 bg-slate-100 hover:bg-slate-200 rounded-xl font-medium transition-colors"
+              >
+                <Printer className="w-5 h-5 mr-2" /> {lang === 'te' ? "ప్రింట్ బిల్" : "Print Bill"}
+              </button>
+              <button 
+                onClick={() => shareSalesWhatsApp(salesGroupExportPrompt.session, lang)} 
+                className="w-full flex items-center justify-center py-3 bg-green-50 text-green-700 hover:bg-green-100 rounded-xl font-medium transition-colors"
+              >
+                <Share2 className="w-5 h-5 mr-2" /> {lang === 'te' ? "వాట్సాప్ ద్వారా షేర్ చేయండి" : "Share via WhatsApp"}
+              </button>
+              <button 
+                onClick={() => setSalesGroupExportPrompt(null)} 
+                className="w-full py-2 text-sm text-slate-500 hover:text-slate-700 font-medium mt-2"
+              >
+                {lang === 'te' ? "మూసివేయండి" : "Close"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Sales Bill Confirmation Modal */}
+      {deletingSalesBill && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-background w-full max-w-md rounded-2xl shadow-xl overflow-hidden p-6 space-y-4">
+            <div className="flex items-center gap-3 text-red-600">
+              <div className="p-3 bg-red-100 rounded-full">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Delete Sales Invoice</h3>
+                <p className="text-xs text-muted-foreground">Move this invoice to the Recycle Bin?</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 border rounded-xl p-4 space-y-1 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Invoice #:</span>
+                <span className="font-semibold">{deletingSalesBill.invoiceNumber || 'N/A'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Buyer:</span>
+                <span className="font-semibold">{detailsModal?.session.buyer_name || '-'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Amount:</span>
+                <span className="font-bold text-red-600">₹{formatInr(deletingSalesBill.grandTotal)}</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-500">
+              This invoice will be moved to the Recycle Bin. You can restore it anytime from Settings → Recycle Bin.
+            </p>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setDeletingSalesBill(null)}
+                className="px-4 py-2 border rounded-lg hover:bg-muted text-sm font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDeleteSalesBill}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors shadow-sm"
+              >
+                Move to Recycle Bin
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

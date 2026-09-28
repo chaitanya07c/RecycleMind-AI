@@ -1,0 +1,586 @@
+import jsPDF from "jspdf"
+import autoTable from "jspdf-autotable"
+import { toast } from "sonner"
+import { formatDate, getItemUnit } from "./utils"
+
+const formatInr = (value: number) => new Intl.NumberFormat('en-IN').format(value)
+
+export const formatQuantity = (name: string, quantity: number, unit?: string, context: 'purchasing' | 'sales' = 'purchasing', shopOrUnits?: any) => {
+  const u = (unit && unit.trim()) ? unit.trim() : getItemUnit(name, context, shopOrUnits)
+  return `${quantity} ${u}`
+}
+
+export type PDFItem = { name: string, quantity: number, rate: number, total: number, unit?: string }
+
+export type PDFBillData = {
+  metadataLeft: string[]
+  metadataRight: string[]
+  items: PDFItem[]
+  itemsTotal?: number
+  additionalExpenses?: { name: string, amount: number }[]
+  additionalExpensesTotal?: number
+  grandTotal: number
+}
+
+export type PDFDocumentData = {
+  title: string
+  subHeader: string
+  bills: PDFBillData[]
+  paymentSummary: {
+    overallAmount: number
+    advanceAmount?: number
+    balanceAmount: number
+    partialPaid: number
+    status: string
+    paymentDate?: string | null
+    completedDate?: string | null
+    paymentHistory?: { date: string, amount: number, remarks?: string | null }[]
+  }
+  filename: string
+}
+
+const drawRupeeValue = (doc: jsPDF, amount: number, x: number, y: number, r: number, g: number, b: number) => {
+  const amountStr = formatInr(amount || 0)
+  const textWidth = doc.getTextWidth(amountStr)
+  const rupeeWidth = 1.6
+  const spacing = 0.4
+  const rupeeX = x - textWidth - rupeeWidth - spacing
+  
+  const originalLineWidth = doc.getLineWidth()
+  const originalDrawColor = doc.getDrawColor()
+  
+  doc.setLineWidth(0.22)
+  doc.setDrawColor(r, g, b)
+  
+  // Top bar
+  doc.line(rupeeX, y - 2.4, rupeeX + 1.8, y - 2.4)
+  // Middle bar
+  doc.line(rupeeX, y - 1.6, rupeeX + 1.4, y - 1.6)
+  // Vertical stem
+  doc.line(rupeeX + 0.4, y - 2.4, rupeeX + 0.4, y - 1.1)
+  // Loop
+  doc.line(rupeeX + 0.4, y - 2.4, rupeeX + 1.2, y - 2.0)
+  doc.line(rupeeX + 1.2, y - 2.0, rupeeX + 0.4, y - 1.6)
+  // Slash
+  doc.line(rupeeX + 0.5, y - 1.6, rupeeX + 1.4, y)
+  
+  doc.setLineWidth(originalLineWidth)
+  doc.setDrawColor(originalDrawColor)
+  doc.text(amountStr, x, y, { align: "right" })
+}
+
+const drawStatusBadge = (doc: jsPDF, statusStr: string, xRight: number, yCenter: number) => {
+  let textR = 180, textG = 100, textB = 0
+  let bgR = 254, bgG = 243, bgB = 199 // amber
+  let displayStr = statusStr
+
+  if (statusStr === 'Completed' || statusStr === 'Completed Paid') {
+    displayStr = 'Completed'
+    textR = 21; textG = 128; textB = 61 // green
+    bgR = 220; bgG = 252; bgB = 231
+  } else if (statusStr === 'Partial Payment' || statusStr === 'Partial Paid') {
+    displayStr = 'Partial Payment'
+    textR = 194; textG = 65; textB = 12 // orange
+    bgR = 255; bgG = 237; bgB = 213
+  } else {
+    displayStr = 'Pending'
+    textR = 180; textG = 100; textB = 0 // amber
+    bgR = 254; bgG = 243; bgB = 199
+  }
+
+  doc.setFont("helvetica", "bold")
+  doc.setFontSize(8.5)
+  const textWidth = doc.getTextWidth(displayStr)
+  const padX = 3
+  const badgeW = textWidth + padX * 2
+  const badgeH = 4.2
+  const badgeX = xRight - badgeW
+  const badgeY = yCenter - badgeH / 2 - 0.2
+
+  const oldFillColor = doc.getFillColor()
+  const oldTextColor = doc.getTextColor()
+
+  doc.setFillColor(bgR, bgG, bgB)
+  doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 1, 1, "F")
+  
+  doc.setTextColor(textR, textG, textB)
+  doc.text(displayStr, badgeX + padX, yCenter + 0.9)
+
+  doc.setFillColor(oldFillColor)
+  doc.setTextColor(oldTextColor)
+}
+
+export const generateProfessionalPDF = async (
+  data: PDFDocumentData, 
+  action: 'download' | 'print' | 'blob'
+): Promise<Blob | undefined> => {
+  const toastId = toast.loading("Generating PDF...")
+  try {
+    const doc = new jsPDF()
+    let y = 42
+
+    const drawHeader = () => {
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(22)
+      doc.setTextColor(30, 60, 90)
+      doc.text("SIVA DURGA TRADERS", 15, 20)
+      
+      doc.setFontSize(8.5)
+      doc.setTextColor(100, 110, 120)
+      doc.text(data.subHeader, 15, 25)
+      
+      doc.setFontSize(10)
+      doc.setFont("helvetica", "normal")
+      doc.setTextColor(60, 70, 80)
+      doc.text("G.Ravi Kumar(Chinni) | Ph.No: 9949835054", 15, 30)
+      
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(16)
+      doc.setTextColor(30, 60, 150)
+      doc.text(data.title, 195, 20, { align: "right" })
+      
+      doc.setDrawColor(200, 205, 210)
+      doc.setLineWidth(0.8)
+      doc.line(15, 33, 195, 33)
+    }
+
+    drawHeader()
+
+    data.bills.forEach((bill) => {
+      const displayItems = bill.items.filter(item => item && item.quantity > 0 && item.total > 0)
+      const tableHeight = 8 + (displayItems.length * 7)
+      const metadataHeight = Math.max(bill.metadataLeft.length, bill.metadataRight.length) * 5 + 5
+      const hasExpenses = bill.additionalExpenses && bill.additionalExpenses.length > 0
+      const expensesHeight = hasExpenses ? (12 + (bill.additionalExpenses!.length * 5.5) + 12) : 0
+      const billHeight = metadataHeight + tableHeight + (hasExpenses ? expensesHeight : 0) + 12
+
+      if (y + billHeight > 275) {
+        doc.addPage()
+        drawHeader()
+        y = 42
+      }
+
+      // Draw Metadata
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(11)
+      doc.setTextColor(30, 30, 30)
+      doc.text(bill.metadataLeft[0] || '', 15, y)
+      doc.text(bill.metadataRight[0] || '', 195, y, { align: "right" })
+
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(9)
+      doc.setTextColor(100, 110, 120)
+      
+      for (let i = 1; i < bill.metadataLeft.length; i++) {
+        doc.text(bill.metadataLeft[i] || '', 15, y + (i * 5))
+      }
+      for (let i = 1; i < bill.metadataRight.length; i++) {
+        const text = bill.metadataRight[i] || ''
+        if (text.startsWith("Date:")) {
+          doc.text(text, 170, y + (i * 5))
+        } else {
+          doc.text(text, 195, y + (i * 5), { align: "right" })
+        }
+      }
+
+      // Draw Table
+      let tableY = y + Math.max(bill.metadataLeft.length, bill.metadataRight.length) * 5 + 5
+      doc.setFillColor(65, 80, 100)
+      doc.rect(15, tableY, 180, 8, "F")
+
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(9)
+      doc.setTextColor(255, 255, 255)
+      doc.text("No", 17, tableY + 5.5)
+      doc.text("CATEGORY", 27, tableY + 5.5)
+      doc.text("QUANTITY", 120, tableY + 5.5, { align: "right" })
+      doc.text("RATE", 155, tableY + 5.5, { align: "right" })
+      doc.text("AMOUNT", 193, tableY + 5.5, { align: "right" })
+
+      // Draw Table Rows
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(9.5)
+      doc.setTextColor(50, 50, 50)
+      
+      displayItems.forEach((item, i) => {
+        const rowY = tableY + 8 + (i * 7)
+        if (i % 2 === 1) {
+          doc.setFillColor(248, 250, 252)
+          doc.rect(15, rowY, 180, 7, "F")
+        }
+        
+        doc.setDrawColor(230, 235, 240)
+        doc.setLineWidth(0.3)
+        doc.line(15, rowY + 7, 195, rowY + 7)
+
+        doc.text(String(i + 1), 17, rowY + 5)
+        doc.text(item.name, 27, rowY + 5)
+        doc.text(formatQuantity(item.name, item.quantity, item.unit), 120, rowY + 5, { align: "right" })
+        doc.text(`Rs ${formatInr(item.rate || 0)}`, 155, rowY + 5, { align: "right" })
+        doc.text(`Rs ${formatInr(item.total || 0)}`, 193, rowY + 5, { align: "right" })
+      })
+
+      // Vertical & Border lines
+      const totalTableHeight = 8 + (displayItems.length * 7)
+      doc.setDrawColor(210, 215, 220)
+      doc.setLineWidth(0.3)
+      doc.line(15, tableY, 15, tableY + totalTableHeight)
+      doc.line(25, tableY, 25, tableY + totalTableHeight)
+      doc.line(100, tableY, 100, tableY + totalTableHeight)
+      doc.line(135, tableY, 135, tableY + totalTableHeight)
+      doc.line(165, tableY, 165, tableY + totalTableHeight)
+      doc.line(195, tableY, 195, tableY + totalTableHeight)
+      doc.line(15, tableY, 195, tableY) 
+      doc.line(15, tableY + totalTableHeight, 195, tableY + totalTableHeight) 
+
+      if (hasExpenses) {
+        // Items Total
+        const itemsTotalY = tableY + totalTableHeight + 5.5
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(9.5)
+        doc.setTextColor(60, 70, 80)
+        doc.text("ITEMS TOTAL:", 155, itemsTotalY, { align: "right" })
+        doc.text(`Rs ${formatInr(bill.itemsTotal || 0)}`, 193, itemsTotalY, { align: "right" })
+
+        // Additional Expenses Section
+        const expStartY = itemsTotalY + 3
+        doc.setFillColor(241, 245, 249)
+        doc.rect(95, expStartY, 100, 6, "F")
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(8.5)
+        doc.setTextColor(51, 65, 85)
+        doc.text("ADDITIONAL EXPENSES", 98, expStartY + 4.2)
+        doc.text("AMOUNT", 193, expStartY + 4.2, { align: "right" })
+
+        doc.setFont("helvetica", "normal")
+        doc.setFontSize(8.5)
+        doc.setTextColor(50, 50, 50)
+        
+        bill.additionalExpenses!.forEach((exp, ei) => {
+          const ey = expStartY + 6 + (ei * 5.2)
+          doc.setDrawColor(241, 245, 249)
+          doc.setLineWidth(0.2)
+          doc.line(95, ey + 5.2, 195, ey + 5.2)
+          doc.text(exp.name, 98, ey + 3.8)
+          doc.text(`Rs ${formatInr(exp.amount || 0)}`, 193, ey + 3.8, { align: "right" })
+        })
+
+        const expEndLineY = expStartY + 6 + (bill.additionalExpenses!.length * 5.2)
+        doc.setDrawColor(203, 213, 225)
+        doc.setLineWidth(0.4)
+        doc.line(95, expEndLineY, 195, expEndLineY)
+
+        const expTotalY = expEndLineY + 5
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(9)
+        doc.setTextColor(60, 70, 80)
+        doc.text("ADDITIONAL EXPENSES TOTAL:", 155, expTotalY, { align: "right" })
+        doc.text(`Rs ${formatInr(bill.additionalExpensesTotal || 0)}`, 193, expTotalY, { align: "right" })
+
+        // Grand Total
+        const grandTotalY = expTotalY + 6.5
+        doc.setDrawColor(148, 163, 184)
+        doc.setLineWidth(0.5)
+        doc.line(95, grandTotalY - 2, 195, grandTotalY - 2)
+
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(11)
+        doc.setTextColor(30, 30, 30)
+        doc.text("GRAND TOTAL:", 155, grandTotalY + 2.5, { align: "right" })
+        doc.text(`Rs ${formatInr(bill.grandTotal || 0)}`, 193, grandTotalY + 2.5, { align: "right" })
+
+        y = grandTotalY + 11
+      } else {
+        // Standard Grand Total
+        const grandTotalY = tableY + totalTableHeight + 6
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(11)
+        doc.setTextColor(30, 30, 30)
+        doc.text("GRAND TOTAL:", 155, grandTotalY, { align: "right" })
+        doc.text(`Rs ${formatInr(bill.grandTotal || 0)}`, 193, grandTotalY, { align: "right" })
+
+        y = grandTotalY + 10
+      }
+    })
+
+    // Payment Summary Section (Simplified ERP Layout)
+    const statusStr = data.paymentSummary.status
+    const isCompleted = statusStr === 'Completed' || statusStr === 'Completed Paid'
+    
+    const advance = data.paymentSummary.advanceAmount || 0
+    const balance = Math.max(0, data.paymentSummary.balanceAmount || 0)
+    const overall = data.paymentSummary.overallAmount || 0
+    const rawHistory = (data.paymentSummary.paymentHistory || []).filter(h => h && Number(h.amount) > 0)
+    const historyDedupeMap = new Map<string, { date: string, amount: number, remarks?: string | null }>()
+    rawHistory.forEach(h => {
+      const key = (h as any).id || `${h.date}_${h.amount}`
+      if (!historyDedupeMap.has(key)) {
+        historyDedupeMap.set(key, h)
+      }
+    })
+    const paymentHistory = Array.from(historyDedupeMap.values())
+    
+    const totalPayments = paymentHistory.reduce((sum, h) => sum + (Number(h.amount) || 0), 0)
+    const partialPaid = data.paymentSummary.partialPaid || totalPayments
+    const totalReceivedSoFar = advance + (totalPayments > 0 ? totalPayments : partialPaid)
+    
+    const isPending = statusStr === 'Pending' || (!isCompleted && totalReceivedSoFar === 0 && balance > 0)
+
+    interface SummaryRow {
+      label: string
+      type: 'status' | 'date' | 'overall' | 'advance' | 'balance'
+      val?: any
+      dividerAfter?: boolean
+    }
+
+    const rows: SummaryRow[] = []
+    const effectiveDateStr = data.paymentSummary.paymentDate || data.paymentSummary.completedDate || (paymentHistory.length > 0 ? paymentHistory[paymentHistory.length - 1].date : new Date().toISOString().split('T')[0])
+
+    if (isCompleted) {
+      // 1. COMPLETED
+      rows.push({ label: "Status", type: 'status', val: "Completed" })
+      rows.push({ label: "Payment Date", type: 'date', val: formatDate(effectiveDateStr), dividerAfter: true })
+      rows.push({ label: "Overall Bill Amount", type: 'overall', val: overall, dividerAfter: advance <= 0 && paymentHistory.length === 0 })
+      if (advance > 0) {
+        rows.push({ label: "Advance Amount", type: 'advance', val: advance, dividerAfter: paymentHistory.length === 0 })
+      }
+      rows.push({ label: "Balance Amount", type: 'balance', val: balance })
+    } else if (isPending && totalReceivedSoFar === 0) {
+      // 2. PENDING
+      rows.push({ label: "Status", type: 'status', val: "Pending", dividerAfter: true })
+      rows.push({ label: "Overall Bill Amount", type: 'overall', val: overall, dividerAfter: advance <= 0 })
+      if (advance > 0) {
+        rows.push({ label: "Advance Amount", type: 'advance', val: advance, dividerAfter: true })
+      }
+      rows.push({ label: "Balance Amount", type: 'balance', val: balance })
+    } else {
+      // 3. PARTIAL PAYMENT
+      rows.push({ label: "Status", type: 'status', val: "Partial Payment" })
+      rows.push({ label: "Payment Date", type: 'date', val: formatDate(effectiveDateStr), dividerAfter: true })
+      rows.push({ label: "Overall Bill Amount", type: 'overall', val: overall, dividerAfter: advance <= 0 && paymentHistory.length === 0 })
+      if (advance > 0) {
+        rows.push({ label: "Advance Amount", type: 'advance', val: advance, dividerAfter: paymentHistory.length === 0 })
+      }
+      rows.push({ label: "Balance Amount", type: 'balance', val: balance })
+    }
+
+    const hasHistory = paymentHistory.length > 0
+    const N = paymentHistory.length
+    const historyRowsHeight = hasHistory ? ((2 + N) * 6.5) : 0
+    const summaryHeight = 7 + (rows.length * 6.5) + historyRowsHeight
+
+    if (y + summaryHeight > 280) {
+      doc.addPage()
+      drawHeader()
+      y = 42
+    }
+
+    const summaryY = y + 5
+    doc.setDrawColor(210, 220, 235)
+    doc.setFillColor(255, 255, 255)
+    doc.setLineWidth(0.4)
+    doc.roundedRect(45, summaryY, 120, summaryHeight, 4, 4, "FD")
+
+    // Title box header
+    doc.setFillColor(245, 247, 250)
+    doc.rect(45, summaryY, 120, 7, "FD")
+    doc.setFont("helvetica", "bold")
+    doc.setFontSize(10)
+    doc.setTextColor(40, 50, 70)
+    doc.text("PAYMENT SUMMARY", 105, summaryY + 5, { align: "center" })
+
+    let curY = summaryY + 7
+
+    rows.forEach((row, idx) => {
+      // Draw Label
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(9.5)
+      if (row.type === 'balance') {
+        doc.setTextColor(180, 0, 0)
+      } else {
+        doc.setTextColor(50, 50, 50)
+      }
+      doc.text(row.label, 50, curY + 4.5)
+
+      // Draw Value
+      if (row.type === 'status') {
+        drawStatusBadge(doc, row.val, 160, curY + 3.25)
+      } else if (row.type === 'date') {
+        doc.setFont("helvetica", "normal")
+        doc.setFontSize(9.5)
+        doc.setTextColor(80, 80, 80)
+        doc.text(row.val, 160, curY + 4.5, { align: "right" })
+      } else if (row.type === 'overall') {
+        drawRupeeValue(doc, row.val, 160, curY + 4.5, 30, 30, 30)
+      } else if (row.type === 'advance') {
+        drawRupeeValue(doc, row.val, 160, curY + 4.5, 109, 40, 217)
+      } else if (row.type === 'balance') {
+        drawRupeeValue(doc, row.val, 160, curY + 4.5, 180, 0, 0)
+      }
+
+      // Draw horizontal divider line after row
+      doc.setDrawColor(225, 230, 238)
+      doc.setLineWidth(row.dividerAfter ? 0.4 : 0.3)
+      doc.line(45, curY + 6.5, 165, curY + 6.5)
+
+      curY += 6.5
+
+      // Insert Payment History subtable right before Balance Amount if history exists
+      if (hasHistory && rows[idx + 1]?.type === 'balance') {
+        // Title
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(9.5)
+        doc.setTextColor(40, 50, 70)
+        doc.text("Payment History", 50, curY + 4.5)
+        doc.setDrawColor(225, 230, 238)
+        doc.setLineWidth(0.3)
+        doc.line(45, curY + 6.5, 165, curY + 6.5)
+        curY += 6.5
+
+        // Headers
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(8.5)
+        doc.setTextColor(100, 110, 120)
+        doc.text("Payment Date", 50, curY + 4.5)
+        doc.text("Amount Paid", 160, curY + 4.5, { align: "right" })
+        doc.setDrawColor(225, 230, 238)
+        doc.setLineWidth(0.3)
+        doc.line(45, curY + 6.5, 165, curY + 6.5)
+        curY += 6.5
+
+        // History items
+        doc.setFont("helvetica", "normal")
+        doc.setFontSize(9)
+        doc.setTextColor(80, 80, 80)
+        paymentHistory.forEach((record) => {
+          doc.text(formatDate(record.date), 50, curY + 4.5)
+          drawRupeeValue(doc, record.amount, 160, curY + 4.5, 21, 128, 61)
+          doc.setDrawColor(225, 230, 238)
+          doc.setLineWidth(0.3)
+          doc.line(45, curY + 6.5, 165, curY + 6.5)
+          curY += 6.5
+        })
+      }
+    })
+
+    y = summaryY + summaryHeight
+
+    toast.dismiss(toastId)
+    if (action === 'download') {
+      doc.save(data.filename)
+    } else if (action === 'print') {
+      doc.autoPrint()
+      window.open(doc.output('bloburl'), '_blank')
+    } else if (action === 'blob') {
+      return doc.output('blob')
+    }
+  } catch (error) {
+    console.error("Failed to generate PDF:", error)
+    toast.dismiss(toastId)
+    toast.error("Error generating document")
+  }
+}
+
+export type PDFTableDocumentData = {
+  title: string
+  subHeader: string
+  filename: string
+  orientation?: "portrait" | "landscape"
+  metadata?: string[] // Optional metadata array to print below header
+  tableHead: string[][]
+  tableBody: any[][]
+}
+
+export const generateTablePDF = async (
+  data: PDFTableDocumentData, 
+  action: 'download' | 'print'
+): Promise<void> => {
+  const toastId = toast.loading("Generating PDF...")
+  try {
+    const doc = new jsPDF({ orientation: data.orientation || 'portrait' })
+    
+    const drawHeader = () => {
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(22)
+      doc.setTextColor(30, 60, 90)
+      doc.text("SIVA DURGA TRADERS", 15, 20)
+      
+      doc.setFontSize(8.5)
+      doc.setTextColor(100, 110, 120)
+      doc.text(data.subHeader, 15, 25)
+      
+      doc.setFontSize(10)
+      doc.setFont("helvetica", "normal")
+      doc.setTextColor(60, 70, 80)
+      doc.text("G.Ravi Kumar(Chinni) | Ph.No: 9949835054", 15, 30)
+      
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(16)
+      doc.setTextColor(30, 60, 150)
+      const titleX = data.orientation === 'landscape' ? 282 : 195
+      doc.text(data.title, titleX, 20, { align: "right" })
+      
+      doc.setDrawColor(200, 205, 210)
+      doc.setLineWidth(0.8)
+      doc.line(15, 33, titleX, 33)
+    }
+
+    drawHeader()
+
+    let y = 42
+
+    if (data.metadata && data.metadata.length > 0) {
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(11)
+      doc.setTextColor(30, 30, 30)
+      doc.text(data.metadata[0], 15, y)
+
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(9)
+      doc.setTextColor(100, 110, 120)
+      for (let i = 1; i < data.metadata.length; i++) {
+        doc.text(data.metadata[i], 15, y + (i * 5))
+      }
+      y += (data.metadata.length * 5) + 5
+    }
+
+    autoTable(doc, {
+      head: data.tableHead,
+      body: data.tableBody,
+      startY: y,
+      theme: 'plain',
+      headStyles: {
+        fillColor: [65, 80, 100],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 9.5,
+        textColor: [50, 50, 50]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 250, 252]
+      },
+      tableLineColor: [210, 215, 220],
+      tableLineWidth: 0.3,
+      styles: {
+        lineColor: [230, 235, 240],
+        lineWidth: 0.3
+      },
+      margin: { left: 15, right: 15 }
+    })
+
+    toast.dismiss(toastId)
+    if (action === 'download') {
+      doc.save(data.filename)
+    } else if (action === 'print') {
+      doc.autoPrint()
+      window.open(doc.output('bloburl'), '_blank')
+    }
+  } catch (error) {
+    console.error("Failed to generate Table PDF:", error)
+    toast.dismiss(toastId)
+    toast.error("Error generating document")
+  }
+}
