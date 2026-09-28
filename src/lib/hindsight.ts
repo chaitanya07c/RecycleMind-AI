@@ -57,8 +57,12 @@ class Hindsight {
 
   async recallMemory(query: string): Promise<Memory[]> {
     const memories = this.getMemories();
-    const queryLower = query.toLowerCase();
-    return memories.filter(m => m.content.toLowerCase().includes(queryLower) || m.title.toLowerCase().includes(queryLower));
+    const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    if (words.length === 0) return [];
+    return memories.filter(m => {
+      const text = (m.content + ' ' + m.title).toLowerCase();
+      return words.some(w => text.includes(w));
+    });
   }
 
   async getRecentMemories(limit: number = 50): Promise<Memory[]> {

@@ -1,17 +1,19 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Brain, Send, Clock, ShoppingCart, DollarSign, Package, Receipt, Users, Lightbulb } from "lucide-react";
 import { hindsight, type Memory } from "../lib/hindsight";
-import { generateAIResponse } from "../lib/groq";
-import { processUserMemory } from "../lib/memoryService";
+import { generateAIResponse, generateGeneralResponse } from "../lib/groq";
+import { classifyRoute, detectModules, saveMemory, recallMemories } from "../lib/memoryService";
+import { businessTools } from "../lib/businessTools";
 
 export function AIMemoryAgent() {
   const [activeTab, setActiveTab] = useState<"chat" | "timeline">("chat");
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState<{role: 'user' | 'ai', content: string}[]>([
-    { role: 'ai', content: "Hello! I'm RecycleMind AI. I remember your business and help you make better decisions." }
+    { role: 'ai', content: "Hello! I'm RecycleMind AI — your ERP business analyst. Ask me anything about purchases, sales, payments, attendance, expenses, or stock." }
   ]);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (activeTab === "timeline") {
@@ -19,54 +21,71 @@ export function AIMemoryAgent() {
     }
   }, [activeTab]);
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
   const loadMemories = async () => {
     const data = await hindsight.getRecentMemories(50);
-    // Sort newest first
     data.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     setMemories(data);
   };
 
   const handleSend = async () => {
-    if (!query.trim()) return;
+    if (!query.trim() || loading) return;
     const userMsg = query;
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setQuery("");
     setLoading(true);
 
     try {
-      // 1. Check if user wants to remember something
-      const memoryResponse = await processUserMemory(userMsg);
-      if (memoryResponse) {
-        setMessages(prev => [...prev, { role: 'ai', content: memoryResponse }]);
-        setLoading(false);
-        return;
+      const route = classifyRoute(userMsg);
+
+      let response: string;
+
+      switch (route) {
+        case 'memory_save': {
+          // Route 2: Save a memory
+          response = await saveMemory(userMsg);
+          break;
+        }
+        case 'memory_recall': {
+          // Route 3: Recall memories
+          response = await recallMemories(userMsg);
+          break;
+        }
+        case 'general': {
+          // Route 4: General conversation
+          response = await generateGeneralResponse(userMsg);
+          break;
+        }
+        case 'erp_analysis':
+        default: {
+          // Route 1: Business analysis (default)
+          const modules = detectModules(userMsg);
+          const context = await businessTools.fetchContext(modules, userMsg);
+          response = await generateAIResponse(userMsg, context);
+          break;
+        }
       }
-
-      // 2. Extract Intent
-      const { extractIntent } = await import("../lib/groq");
-      const intents = await extractIntent(userMsg);
-
-      // 3. Fetch structured context using business tools
-      const { businessTools } = await import("../lib/businessTools");
-      const context = await businessTools.fetchContext(intents, userMsg);
-      
-      // 4. Generate AI response
-      const response = await generateAIResponse(userMsg, context);
 
       setMessages(prev => [...prev, { role: 'ai', content: response }]);
     } catch (error: any) {
-      console.error("AI Memory Agent Error:", error);
-      setMessages(prev => [...prev, { role: 'ai', content: error.message || "An error occurred while generating the response." }]);
+      console.error("AI pipeline error:", error);
+      const errorMsg = error?.message || "Something went wrong. Check the console for details.";
+      setMessages(prev => [...prev, { role: 'ai', content: errorMsg }]);
     } finally {
       setLoading(false);
     }
   };
 
   const suggestions = [
-    "Who has the highest pending payment?",
-    "Which shop buys the most?",
-    "Show today's collections.",
-    "Which customer usually pays late?",
+    "Who usually pays late?",
+    "Cheapest Kingfisher supplier?",
+    "Stock running low?",
+    "Compare this month with last month",
+    "Remember Babi Garu prefers cash",
+    "What do you remember about Babi Garu?",
   ];
 
   const getMemoryIcon = (type: string) => {
@@ -76,7 +95,9 @@ export function AIMemoryAgent() {
       case 'sale': return <Package className="w-6 h-6" />;
       case 'expense': return <Receipt className="w-6 h-6" />;
       case 'attendance': return <Users className="w-6 h-6" />;
-      case 'learned memory': return <Lightbulb className="w-6 h-6" />;
+      case 'learned memory':
+      case 'learned business fact':
+        return <Lightbulb className="w-6 h-6" />;
       default: return <Clock className="w-6 h-6" />;
     }
   };
@@ -85,7 +106,7 @@ export function AIMemoryAgent() {
     <div className="flex flex-col h-[calc(100vh-4rem)] max-w-5xl mx-auto space-y-4">
       <div className="flex items-center gap-3">
         <Brain className="w-8 h-8 text-emerald-500" />
-        <h2 className="text-2xl font-bold">AI Memory Agent</h2>
+        <h2 className="text-2xl font-bold">AI ERP Analyst</h2>
       </div>
 
       <div className="flex space-x-2 border-b">
@@ -108,18 +129,22 @@ export function AIMemoryAgent() {
           <div className="flex-1 overflow-y-auto space-y-4 pr-2">
             {messages.map((msg, i) => (
               <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] rounded-lg p-3 ${msg.role === 'user' ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-800'}`}>
+                <div className={`max-w-[80%] rounded-lg p-3 whitespace-pre-line ${msg.role === 'user' ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-800'}`}>
                   {msg.content}
                 </div>
               </div>
             ))}
             {loading && (
               <div className="flex justify-start">
-                <div className="bg-gray-100 text-gray-800 rounded-lg p-3 animate-pulse">
-                  Thinking...
+                <div className="bg-gray-100 text-gray-800 rounded-lg p-3 flex items-center gap-2">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  <span className="text-sm text-gray-500 ml-1">Analyzing your ERP data...</span>
                 </div>
               </div>
             )}
+            <div ref={chatEndRef} />
           </div>
           
           <div className="flex flex-wrap gap-2 pt-2 border-t">
