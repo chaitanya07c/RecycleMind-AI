@@ -23,7 +23,7 @@ export async function generateAIResponse(prompt: string, context: string): Promi
           content: `Context:\n${context}\n\nQuestion: ${prompt}`
         }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
     });
 
     return response.choices[0]?.message?.content || "No response generated.";
