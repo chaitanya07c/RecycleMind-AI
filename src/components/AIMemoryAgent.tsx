@@ -2,7 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import { Brain, Send, Clock, ShoppingCart, DollarSign, Package, Receipt, Users, Lightbulb } from "lucide-react";
 import { hindsight, type Memory } from "../lib/hindsight";
 import { generateAIResponse, generateGeneralResponse } from "../lib/groq";
-import { classifyRoute, detectModules, saveMemory, recallMemories } from "../lib/memoryService";
+import {
+  classifyRoute,
+  detectModules,
+  saveMemory,
+  recallMemories,
+  forgetMemory
+} from "../lib/memoryService";
 import { businessTools } from "../lib/businessTools";
 
 export function AIMemoryAgent() {
@@ -47,6 +53,11 @@ export function AIMemoryAgent() {
         case 'memory_save': {
           // Route 2: Save a memory
           response = await saveMemory(userMsg);
+          break;
+        }
+        case 'memory_forget': {
+          // Route 5: Forget a memory
+          response = await forgetMemory(userMsg);
           break;
         }
         case 'memory_recall': {

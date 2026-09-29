@@ -7,11 +7,15 @@ export interface Memory {
   timestamp: string;
 }
 
-const hindsightKey = import.meta.env.VITE_HINDSIGHT_API_KEY || localStorage.getItem('VITE_HINDSIGHT_API_KEY');
-const hindsightProjectId = import.meta.env.VITE_HINDSIGHT_PROJECT_ID || 'default';
+const hindsightKey =
+  import.meta.env.VITE_HINDSIGHT_API_KEY ||
+  localStorage.getItem("VITE_HINDSIGHT_API_KEY");
+
+const hindsightProjectId =
+  import.meta.env.VITE_HINDSIGHT_PROJECT_ID || "default";
 
 class Hindsight {
-  private key = 'hindsight_memories';
+  private key = "hindsight_memories";
 
   constructor() {
     console.log("Hindsight Project ID:", hindsightProjectId);
@@ -26,56 +30,94 @@ class Hindsight {
     localStorage.setItem(this.key, JSON.stringify(memories));
   }
 
-  async createMemory(memory: Omit<Memory, 'id' | 'timestamp'>) {
+  // CREATE MEMORY (No duplicates)
+  async createMemory(memory: Omit<Memory, "id" | "timestamp">) {
     if (!hindsightKey) {
       console.warn("Hindsight API key not configured. Using local fallback.");
     }
+
     try {
       const memories = this.getMemories();
+
+      // Remove duplicate memory if same content already exists
+      const filtered = memories.filter(
+        (m) =>
+          m.content.toLowerCase().trim() !==
+          memory.content.toLowerCase().trim()
+      );
+
       const newMemory: Memory = {
         ...memory,
         id: crypto.randomUUID(),
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       };
-      memories.unshift(newMemory);
-      this.saveMemories(memories);
+
+      filtered.unshift(newMemory);
+      this.saveMemories(filtered);
+
       return newMemory;
     } catch (e: any) {
-      console.error("Hindsight failed to create memory:", e.message || e);
-      // Never block business operations
+      console.error("Hindsight failed:", e.message || e);
     }
   }
 
-  async retainMemory(content: string, type: string = 'Learned Memory', title: string = 'User Fact') {
+  async retainMemory(
+    content: string,
+    type: string = "Learned Memory",
+    title: string = "User Fact"
+  ) {
     return this.createMemory({
       type,
       title,
       content,
-      metadata: {}
+      metadata: {},
     });
   }
 
+  // RECALL MEMORY
   async recallMemory(query: string): Promise<Memory[]> {
     const memories = this.getMemories();
-    const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+    const words = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 2);
+
     if (words.length === 0) return [];
-    return memories.filter(m => {
-      const text = (m.content + ' ' + m.title).toLowerCase();
-      return words.some(w => text.includes(w));
+
+    return memories.filter((m) => {
+      const text = (m.content + " " + m.title).toLowerCase();
+      return words.some((w) => text.includes(w));
     });
+  }
+
+  // DELETE MEMORY
+  async deleteMemory(query: string): Promise<boolean> {
+    const memories = this.getMemories();
+
+    const fact = query.toLowerCase().trim();
+
+    const filtered = memories.filter(
+      (m) => !m.content.toLowerCase().includes(fact)
+    );
+
+    this.saveMemories(filtered);
+
+    return filtered.length !== memories.length;
+  }
+
+  // CLEAR ALL MEMORIES (optional)
+  async clearAllMemories() {
+    localStorage.removeItem(this.key);
   }
 
   async getRecentMemories(limit: number = 50): Promise<Memory[]> {
-    if (!hindsightKey) {
-      console.warn("Hindsight API key not configured. Using local fallback.");
-    }
     return this.getMemories().slice(0, limit);
   }
 
   async getMemoriesByType(type: string): Promise<Memory[]> {
-    return this.getMemories().filter(m => m.type === type);
+    return this.getMemories().filter((m) => m.type === type);
   }
 }
 
 export const hindsight = new Hindsight();
-
